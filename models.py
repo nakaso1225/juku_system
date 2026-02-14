@@ -35,6 +35,15 @@ class StudentSyncPreview:
     removed_assignments: int
 
 
+@dataclass
+class UnifiedSyncPreview:
+    kind: str
+    imported_count: int
+    removed_names: list[str]
+    removed_assignments: int
+    availability_rows: int = 0
+
+
 def list_students() -> list[dict[str, Any]]:
     conn = get_connection()
     rows = conn.execute("SELECT id, name FROM students ORDER BY name").fetchall()
@@ -773,6 +782,14 @@ def import_students_from_uploaded_file(filename: str, content: bytes) -> ImportR
     return _import_students_records(records)
 
 
+def import_schedule_from_uploaded_file(filename: str, content: bytes) -> tuple[str, ImportResult]:
+    records = _records_from_uploaded_file(filename, content)
+    kind = _detect_schedule_kind(records)
+    if kind == "teacher":
+        return kind, _import_teachers_records(records)
+    return kind, _import_students_records(records)
+
+
 def preview_students_sync_from_uploaded_file(filename: str, content: bytes) -> StudentSyncPreview:
     records = _records_from_uploaded_file(filename, content)
     if not records:
@@ -809,6 +826,26 @@ def preview_students_sync_from_uploaded_file(filename: str, content: bytes) -> S
     )
 
 
+def preview_schedule_sync_from_uploaded_file(filename: str, content: bytes) -> UnifiedSyncPreview:
+    records = _records_from_uploaded_file(filename, content)
+    kind = _detect_schedule_kind(records)
+    if kind == "teacher":
+        preview = preview_teachers_sync_from_uploaded_file(filename, content)
+        return UnifiedSyncPreview(
+            kind="teacher",
+            imported_count=preview.imported_teachers,
+            removed_names=preview.removed_teacher_names,
+            removed_assignments=preview.removed_assignments,
+        )
+    preview = preview_students_sync_from_uploaded_file(filename, content)
+    return UnifiedSyncPreview(
+        kind="student",
+        imported_count=preview.imported_students,
+        removed_names=preview.removed_student_names,
+        removed_assignments=preview.removed_assignments,
+    )
+
+
 def _validate_student_header(header: list[str]) -> None:
     if len(header) < 4:
         raise ValueError("ヘッダー列数が不足しています（最低4列必要）")
@@ -820,6 +857,35 @@ def _validate_student_header(header: list[str]) -> None:
     date_cols = [h for h in header if _parse_header_to_date(h or "")]
     if not date_cols:
         raise ValueError("日付列（受講可能予定）が見つかりません")
+
+
+def _detect_schedule_kind(records: list[list[str]]) -> str:
+    if not records:
+        raise ValueError("データが空です")
+    header = records[0]
+    teacher_ok = True
+    student_ok = True
+    try:
+        _validate_teacher_header(header)
+    except Exception:
+        teacher_ok = False
+    try:
+        _validate_student_header(header)
+    except Exception:
+        student_ok = False
+
+    if teacher_ok and not student_ok:
+        return "teacher"
+    if student_ok and not teacher_ok:
+        return "student"
+
+    joined = "".join(header)
+    if teacher_ok and student_ok:
+        if "講師名" in joined:
+            return "teacher"
+        if "氏名" in joined:
+            return "student"
+    raise ValueError("ファイル種別を判定できません（講師/生徒フォーマットを確認してください）")
 
 
 def _import_students_records(records: list[list[str]]) -> ImportResult:

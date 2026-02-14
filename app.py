@@ -22,9 +22,9 @@ from models import (
     get_slot_teacher_summary,
     get_student_timetable,
     get_used_tables,
-    import_students_from_uploaded_file,
+    import_schedule_from_uploaded_file,
     import_teachers_from_uploaded_file,
-    preview_students_sync_from_uploaded_file,
+    preview_schedule_sync_from_uploaded_file,
     preview_teachers_sync_from_uploaded_file,
     import_teachers,
     list_conflicts,
@@ -289,6 +289,60 @@ def api_sync_students_upload_apply():
             "imported_students": result.students,
             "availability_rows": result.availability_rows,
             "removed_students": result.removed_students,
+            "removed_assignments": result.removed_assignments,
+        }
+    )
+
+
+@app.route("/api/sync-upload", methods=["POST"])
+def api_sync_upload_preview():
+    upload = request.files.get("file")
+    if upload is None or not upload.filename:
+        return jsonify({"error": "ファイルを選択してください"}), 400
+    try:
+        content = upload.read()
+        preview = preview_schedule_sync_from_uploaded_file(upload.filename, content)
+    except Exception as exc:
+        return jsonify({"error": str(exc)}), 400
+
+    return jsonify(
+        {
+            "kind": preview.kind,
+            "imported_count": preview.imported_count,
+            "removed_names": preview.removed_names,
+            "removed_count": len(preview.removed_names),
+            "removed_assignments": preview.removed_assignments,
+        }
+    )
+
+
+@app.route("/api/sync-upload/apply", methods=["POST"])
+def api_sync_upload_apply():
+    upload = request.files.get("file")
+    if upload is None or not upload.filename:
+        return jsonify({"error": "ファイルを選択してください"}), 400
+    try:
+        content = upload.read()
+        kind, result = import_schedule_from_uploaded_file(upload.filename, content)
+    except Exception as exc:
+        return jsonify({"error": str(exc)}), 400
+
+    if kind == "teacher":
+        return jsonify(
+            {
+                "kind": "teacher",
+                "imported_count": result.teachers,
+                "availability_rows": result.availability_rows,
+                "removed_count": result.removed_teachers,
+                "removed_assignments": result.removed_assignments,
+            }
+        )
+    return jsonify(
+        {
+            "kind": "student",
+            "imported_count": result.students,
+            "availability_rows": result.availability_rows,
+            "removed_count": result.removed_students,
             "removed_assignments": result.removed_assignments,
         }
     )

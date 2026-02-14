@@ -10,19 +10,24 @@
     <main class="container">
       <header class="toolbar">
         <div class="row">
-          <label for="student-select">生徒選択:</label>
-          <select id="student-select"></select>
+          <label for="student-combo">生徒選択:</label>
+          <div class="student-picker">
+            <div class="student-search-wrap">
+              <input id="student-combo" class="student-search" type="text" placeholder="生徒名を入力して選択" />
+              <button id="student-clear-btn" class="clear-btn" type="button" aria-label="検索文字を消す">×</button>
+            </div>
+            <div id="student-dropdown" class="student-dropdown hidden"></div>
+          </div>
 
           <label for="subject-select">科目選択:</label>
           <select id="subject-select"></select>
         </div>
         <div class="row actions">
-          <input id="student-file-input" type="file" accept=".csv,.xlsx,.xlsm" />
-          <button id="sync-students-btn" type="button">生徒予定表を取り込む</button>
-          <input id="teacher-file-input" type="file" accept=".csv,.xlsx,.xlsm" />
-          <button id="sync-upload-btn" type="button">講師予定表を取り込む</button>
+          <input id="schedule-file-input" type="file" accept=".csv,.xlsx,.xlsm" />
+          <button id="sync-upload-btn" type="button">予定表ファイルを取り込む</button>
         </div>
         <div id="subject-counts" class="counts"></div>
+        <div id="flash-message" class="flash hidden"></div>
       </header>
 
       <section id="conflict-bar" class="conflict-bar hidden"></section>

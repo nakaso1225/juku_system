@@ -9,6 +9,8 @@ const state = {
   selectedSlot: null,
 };
 
+let flashTimer = null;
+
 const subjectAbbrevRules = [
   [/算数/, "算"],
   [/数学/, "M"],
@@ -65,24 +67,90 @@ async function loadBaseData() {
   state.meta = await api("/api/meta");
   state.students = await api("/api/students");
 
-  const studentSelect = document.getElementById("student-select");
+  const studentCombo = document.getElementById("student-combo");
   const subjectSelect = document.getElementById("subject-select");
 
-  studentSelect.innerHTML = "";
-  for (const student of state.students) {
-    const opt = document.createElement("option");
-    opt.value = String(student.id);
-    opt.textContent = student.name;
-    studentSelect.appendChild(opt);
-  }
+  renderStudentOptions("");
 
   if (state.students.length > 0) {
     state.selectedStudentId = state.students[0].id;
-    studentSelect.value = String(state.selectedStudentId);
+    if (studentCombo) studentCombo.value = state.students[0].name;
+  } else {
+    state.selectedStudentId = null;
+    if (studentCombo) studentCombo.value = "";
   }
+  updateStudentPlaceholder();
   state.selectedSubject = state.meta.subjects[0] || null;
   buildSubjectSelect([]);
   subjectSelect.value = state.selectedSubject;
+}
+
+function renderStudentOptions(filterText) {
+  const dropdown = document.getElementById("student-dropdown");
+  if (!dropdown) return;
+  const keyword = (filterText || "").trim();
+  const list = keyword
+    ? state.students.filter((s) => s.name.includes(keyword))
+    : state.students;
+  dropdown.innerHTML = "";
+  for (const student of list) {
+    const row = document.createElement("div");
+    row.className = "student-option";
+    row.textContent = student.name;
+    row.addEventListener("mousedown", async (e) => {
+      e.preventDefault();
+      const combo = document.getElementById("student-combo");
+      if (combo) combo.value = student.name;
+      state.selectedStudentId = student.id;
+      hideStudentDropdown();
+      await loadTimetable();
+    });
+    dropdown.appendChild(row);
+  }
+  if (list.length === 0) {
+    const empty = document.createElement("div");
+    empty.className = "student-option";
+    empty.textContent = "該当なし";
+    dropdown.appendChild(empty);
+  }
+}
+
+function showStudentDropdown() {
+  const dropdown = document.getElementById("student-dropdown");
+  if (!dropdown) return;
+  dropdown.classList.remove("hidden");
+}
+
+function hideStudentDropdown() {
+  const dropdown = document.getElementById("student-dropdown");
+  if (!dropdown) return;
+  dropdown.classList.add("hidden");
+}
+
+function isStudentDropdownVisible() {
+  const dropdown = document.getElementById("student-dropdown");
+  return !!dropdown && !dropdown.classList.contains("hidden");
+}
+
+function updateStudentPlaceholder() {
+  const combo = document.getElementById("student-combo");
+  if (!combo) return;
+  const selected = state.students.find((s) => s.id === state.selectedStudentId);
+  combo.placeholder = selected
+    ? `現在: ${selected.name}（入力して検索）`
+    : "生徒名を入力して選択";
+}
+
+function showFlash(message, type = "info") {
+  const el = document.getElementById("flash-message");
+  if (!el) return;
+  el.textContent = message;
+  el.classList.remove("hidden", "error");
+  if (type === "error") el.classList.add("error");
+  if (flashTimer) clearTimeout(flashTimer);
+  flashTimer = setTimeout(() => {
+    el.classList.add("hidden");
+  }, 5000);
 }
 
 function buildSubjectSelect(enrolledSubjects) {
@@ -117,7 +185,19 @@ function buildSubjectSelect(enrolledSubjects) {
 }
 
 async function loadTimetable() {
-  if (!state.selectedStudentId) return;
+  if (!state.selectedStudentId) {
+    state.timetable = {
+      student: null,
+      availability: [],
+      assignments: [],
+      subject_counts: {},
+      enrolled_subjects: [],
+    };
+    state.conflicts = [];
+    state.slotSummary = [];
+    render();
+    return;
+  }
   state.timetable = await api(`/api/students/${state.selectedStudentId}/timetable`);
   buildSubjectSelect(state.timetable.enrolled_subjects || []);
   if (
@@ -220,12 +300,13 @@ function renderConflictBar() {
 async function jumpToConflictStudent(date, period, studentName) {
   const targetStudent = (state.students || []).find((s) => s.name === studentName);
   if (!targetStudent) {
-    alert(`生徒が見つかりません: ${studentName}`);
+    showFlash(`生徒が見つかりません: ${studentName}`, "error");
     return;
   }
 
   state.selectedStudentId = targetStudent.id;
-  document.getElementById("student-select").value = String(targetStudent.id);
+  const combo = document.getElementById("student-combo");
+  if (combo) combo.value = targetStudent.name;
   await loadTimetable();
 
   const assignment =
@@ -296,7 +377,14 @@ function renderGrid() {
         ) {
           td.classList.add("conflict");
         }
-        td.textContent = `${subjectAbbrev(assignment.subject)} ${assignment.teacher_name} [${assignment.table_id}]`;
+        const reasons = [];
+        if (assignment.has_teacher_conflict) reasons.push("講師重複");
+        if (assignment.has_table_conflict) reasons.push("席重複");
+        if (assignment.has_schedule_mismatch) reasons.push("講師予定不一致");
+        if (assignment.has_student_schedule_mismatch) reasons.push("生徒予定不一致");
+        td.innerHTML = `<div class=\"cell-main\">${subjectAbbrev(assignment.subject)} ${assignment.teacher_name} [${assignment.table_id}]</div>${
+          reasons.length ? `<div class=\"cell-reason\">${reasons.join(" / ")}</div>` : ""
+        }`;
         td.addEventListener("click", () => openTeacherModal(date, period, assignment));
       } else if (!available) {
         td.classList.add("unavailable");
@@ -312,47 +400,6 @@ function renderGrid() {
     }
 
     table.appendChild(tr);
-  }
-}
-
-async function syncStudentsFromFile() {
-  const input = document.getElementById("student-file-input");
-  if (!input || !input.files || input.files.length === 0) {
-    alert("取り込む生徒予定表ファイル（CSV/XLSX）を選択してください。");
-    return;
-  }
-  const file = input.files[0];
-  const fd = new FormData();
-  fd.append("file", file);
-
-  try {
-    const pRes = await fetch("/api/sync-students-upload", { method: "POST", body: fd });
-    const preview = await pRes.json();
-    if (!pRes.ok) throw new Error(preview.error || `HTTP ${pRes.status}`);
-
-    if ((preview.removed_students || 0) > 0) {
-      const msg =
-        `予定表から消える生徒がいます。\n対象: ${(preview.removed_student_names || []).join(", ")}\n` +
-        `削除生徒数: ${preview.removed_students} / 削除される割り当て: ${preview.removed_assignments}\n\n本当に反映しますか？`;
-      const ok = await showConfirmModal(msg);
-      if (!ok) return;
-    }
-
-    const applyFd = new FormData();
-    applyFd.append("file", file);
-    const res = await fetch("/api/sync-students-upload/apply", {
-      method: "POST",
-      body: applyFd,
-    });
-    const result = await res.json();
-    if (!res.ok) throw new Error(result.error || `HTTP ${res.status}`);
-
-    alert(`生徒予定反映完了: ${JSON.stringify(result)}`);
-    await loadBaseData();
-    await loadTimetable();
-    input.value = "";
-  } catch (err) {
-    alert(`取り込み失敗: ${err.message}`);
   }
 }
 
@@ -481,20 +528,20 @@ function showConfirmModal(message) {
 }
 
 async function syncScheduleFromFile() {
-  const input = document.getElementById("teacher-file-input");
+  const input = document.getElementById("schedule-file-input");
   if (!input) {
-    alert("ファイル選択欄が見つかりません。画面を再読み込みしてください。");
+    showFlash("ファイル選択欄が見つかりません。画面を再読み込みしてください。", "error");
     return;
   }
   if (!input.files || input.files.length === 0) {
-    alert("取り込む予定表ファイル（CSV/XLSX）を選択してください。");
+    showFlash("取り込む予定表ファイル（CSV/XLSX）を選択してください。", "error");
     return;
   }
   const file = input.files[0];
   const formData = new FormData();
   formData.append("file", file);
   try {
-    const previewRes = await fetch("/api/sync-schedule-upload", {
+    const previewRes = await fetch("/api/sync-upload", {
       method: "POST",
       body: formData,
     });
@@ -503,12 +550,13 @@ async function syncScheduleFromFile() {
       throw new Error(preview.error || `HTTP ${previewRes.status}`);
     }
 
-    if ((preview.removed_teachers || 0) > 0) {
-      const names = (preview.removed_teacher_names || []).join(", ");
+    if ((preview.removed_count || 0) > 0) {
+      const names = (preview.removed_names || []).join(", ");
+      const label = preview.kind === "teacher" ? "講師" : "生徒";
       const msg =
-        `予定表から消える講師がいます。\n` +
+        `予定表から消える${label}がいます。\n` +
         `対象: ${names}\n` +
-        `削除講師数: ${preview.removed_teachers} / 削除される割り当て: ${preview.removed_assignments}\n\n` +
+        `削除${label}数: ${preview.removed_count} / 削除される割り当て: ${preview.removed_assignments}\n\n` +
         `本当に反映しますか？`;
       const ok = await showConfirmModal(msg);
       if (!ok) {
@@ -518,7 +566,7 @@ async function syncScheduleFromFile() {
 
     const applyFormData = new FormData();
     applyFormData.append("file", file);
-    const res = await fetch("/api/sync-schedule-upload/apply", {
+    const res = await fetch("/api/sync-upload/apply", {
       method: "POST",
       body: applyFormData,
     });
@@ -527,29 +575,77 @@ async function syncScheduleFromFile() {
       throw new Error(result.error || `HTTP ${res.status}`);
     }
 
-    alert(`予定表反映完了: ${JSON.stringify(result)}`);
+    const label = result.kind === "teacher" ? "講師予定" : "生徒予定";
+    showFlash(`${label}反映完了: 取込${result.imported_count}件 / 削除${result.removed_count}件`);
     state.students = await api("/api/students");
     await loadBaseData();
     await loadTimetable();
     input.value = "";
   } catch (err) {
-    alert(`取り込み失敗: ${err.message}`);
+    showFlash(`取り込み失敗: ${err.message}`, "error");
   }
 }
 
 function bindEvents() {
-  const studentSelect = document.getElementById("student-select");
+  const studentCombo = document.getElementById("student-combo");
+  const studentClearBtn = document.getElementById("student-clear-btn");
+  const studentDropdown = document.getElementById("student-dropdown");
   const subjectSelect = document.getElementById("subject-select");
   const cancelBtn = document.getElementById("cancel-modal-btn");
   const modal = document.getElementById("teacher-modal");
   const syncBtn = document.getElementById("sync-upload-btn");
-  const syncStudentsBtn = document.getElementById("sync-students-btn");
+  const resolveStudentFromInput = async (text) => {
+    const value = (text || "").trim();
+    if (!value) return;
+    const exact = state.students.find((s) => s.name === value);
+    const target = exact || state.students.find((s) => s.name.includes(value));
+    if (!target) return;
+    if (target.id === state.selectedStudentId) return;
+    state.selectedStudentId = target.id;
+    if (studentCombo) studentCombo.value = target.name;
+    updateStudentPlaceholder();
+    await loadTimetable();
+  };
 
-  if (studentSelect) {
-    studentSelect.addEventListener("change", async (e) => {
-      state.selectedStudentId = Number(e.target.value);
-      await loadTimetable();
+  if (studentCombo) {
+    studentCombo.addEventListener("focus", () => {
+      renderStudentOptions(studentCombo.value);
+      showStudentDropdown();
     });
+    studentCombo.addEventListener("input", () => {
+      renderStudentOptions(studentCombo.value);
+      showStudentDropdown();
+    });
+    studentCombo.addEventListener("change", async (e) => {
+      await resolveStudentFromInput(e.target.value);
+    });
+    studentCombo.addEventListener("keydown", async (e) => {
+      if (e.key === "Enter") {
+        await resolveStudentFromInput(e.target.value);
+        hideStudentDropdown();
+      }
+      if (e.key === "Escape") hideStudentDropdown();
+    });
+    studentCombo.addEventListener("blur", () => {
+      setTimeout(() => hideStudentDropdown(), 100);
+    });
+  }
+  if (studentClearBtn) {
+    studentClearBtn.addEventListener("click", () => {
+      if (!studentCombo) return;
+      studentCombo.value = "";
+      renderStudentOptions("");
+      if (isStudentDropdownVisible()) {
+        hideStudentDropdown();
+      } else {
+        showStudentDropdown();
+      }
+      updateStudentPlaceholder();
+      studentCombo.focus();
+    });
+  }
+  if (studentDropdown) {
+    studentDropdown.addEventListener("mousedown", (e) => e.preventDefault());
   }
 
   if (subjectSelect) {
@@ -575,11 +671,6 @@ function bindEvents() {
       await syncScheduleFromFile();
     });
   }
-  if (syncStudentsBtn) {
-    syncStudentsBtn.addEventListener("click", async () => {
-      await syncStudentsFromFile();
-    });
-  }
 }
 
 async function main() {
@@ -590,5 +681,5 @@ async function main() {
 
 main().catch((err) => {
   console.error(err);
-  alert(`初期化エラー: ${err.message}`);
+  showFlash(`初期化エラー: ${err.message}`, "error");
 });
