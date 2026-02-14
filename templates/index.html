@@ -1,0 +1,63 @@
+<!doctype html>
+<html lang="ja">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>塾時間割登録</title>
+    <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}" />
+  </head>
+  <body>
+    <main class="container">
+      <header class="toolbar">
+        <div class="row">
+          <label for="student-select">生徒選択:</label>
+          <select id="student-select"></select>
+
+          <label for="subject-select">科目選択:</label>
+          <select id="subject-select"></select>
+        </div>
+        <div class="row actions">
+          <input id="student-file-input" type="file" accept=".csv,.xlsx,.xlsm" />
+          <button id="sync-students-btn" type="button">生徒予定表を取り込む</button>
+          <input id="teacher-file-input" type="file" accept=".csv,.xlsx,.xlsm" />
+          <button id="sync-upload-btn" type="button">講師予定表を取り込む</button>
+        </div>
+        <div id="subject-counts" class="counts"></div>
+      </header>
+
+      <section id="conflict-bar" class="conflict-bar hidden"></section>
+
+      <section class="grid-wrap">
+        <table id="timetable"></table>
+      </section>
+    </main>
+
+    <div id="teacher-modal" class="modal hidden">
+      <div class="modal-content">
+        <div class="modal-header">
+          <div id="modal-title" class="modal-title"></div>
+          <button id="cancel-modal-btn" type="button">キャンセル</button>
+        </div>
+        <div class="row">
+          <label for="table-select">テーブル:</label>
+          <select id="table-select"></select>
+        </div>
+        <div id="teacher-list"></div>
+        <button id="remove-assignment-btn" type="button" class="danger hidden">この割り当てを解除</button>
+      </div>
+    </div>
+
+    <div id="confirm-modal" class="modal hidden">
+      <div class="modal-content">
+        <div class="modal-title">確認</div>
+        <div id="confirm-message" class="confirm-message"></div>
+        <div class="row actions">
+          <button id="confirm-no-btn" type="button">キャンセル</button>
+          <button id="confirm-yes-btn" type="button" class="danger">反映する</button>
+        </div>
+      </div>
+    </div>
+
+    <script src="{{ url_for('static', filename='app.js') }}"></script>
+  </body>
+</html>

@@ -1,0 +1,192 @@
+:root {
+  --bg: #f7f7f4;
+  --panel: #ffffff;
+  --line: #d5d9d6;
+  --text: #18211f;
+  --muted: #54625d;
+  --accent: #146b5a;
+  --subject: #d6f1eb;
+  --other: #eef2f1;
+  --danger: #a81f2d;
+}
+
+body {
+  margin: 0;
+  font-family: "Noto Sans JP", "Hiragino Kaku Gothic ProN", sans-serif;
+  background: radial-gradient(circle at top left, #ffffff 0%, var(--bg) 55%);
+  color: var(--text);
+}
+
+.container {
+  max-width: 1200px;
+  margin: 0 auto;
+  padding: 16px;
+}
+
+.toolbar {
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  padding: 12px;
+}
+
+.row {
+  display: flex;
+  gap: 10px;
+  align-items: center;
+  flex-wrap: wrap;
+}
+
+.actions {
+  margin-top: 8px;
+}
+
+select,
+button {
+  border: 1px solid #bfc8c4;
+  border-radius: 8px;
+  padding: 6px 10px;
+  background: #fff;
+}
+
+.counts {
+  margin-top: 10px;
+  color: var(--muted);
+  font-size: 14px;
+}
+
+.conflict-bar {
+  margin-top: 10px;
+  border: 1px solid #f1b2b7;
+  background: #fff0f2;
+  color: #7b1520;
+  border-radius: 10px;
+  padding: 10px;
+}
+
+.conflict-line {
+  margin: 2px 0;
+}
+
+.conflict-student {
+  display: inline-block;
+  border: 1px solid #ca5a65;
+  background: #fff;
+  color: #7b1520;
+  border-radius: 6px;
+  padding: 2px 8px;
+  cursor: pointer;
+}
+
+.hidden {
+  display: none !important;
+}
+
+.grid-wrap {
+  margin-top: 12px;
+  overflow-x: auto;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: var(--panel);
+}
+
+#timetable {
+  width: 100%;
+  border-collapse: collapse;
+  min-width: 950px;
+}
+
+#timetable th,
+#timetable td {
+  border: 1px solid var(--line);
+  padding: 8px;
+  text-align: center;
+  font-size: 13px;
+}
+
+#timetable th {
+  background: #f0f4f2;
+  font-weight: 600;
+}
+
+.cell {
+  min-height: 48px;
+  cursor: pointer;
+  background: #ffffff;
+}
+
+.cell.unavailable {
+  background: #dcdcdc;
+  color: #666;
+  cursor: not-allowed;
+}
+
+.cell.has-open-teacher {
+  background: #e8f8e8;
+}
+
+.cell.conflict {
+  background: #ffd8dc;
+  border-color: #cc4555;
+}
+
+.modal {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.28);
+  display: grid;
+  place-items: center;
+}
+
+.modal-content {
+  width: min(520px, 92vw);
+  background: #fff;
+  border-radius: 12px;
+  border: 1px solid var(--line);
+  padding: 14px;
+}
+
+.modal-title {
+  font-weight: 600;
+  margin-bottom: 8px;
+}
+
+.modal-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 8px;
+}
+
+.teacher-item {
+  width: 100%;
+  text-align: left;
+  margin-bottom: 6px;
+}
+
+.teacher-item.conflict {
+  border-color: #f2a8b0;
+  background: #fff3f5;
+}
+
+.danger {
+  border-color: #ca5a65;
+  color: #8f1c28;
+}
+
+.confirm-message {
+  white-space: pre-line;
+  margin: 8px 0 12px;
+}
+
+@media (max-width: 720px) {
+  .container {
+    padding: 10px;
+  }
+
+  #timetable th,
+  #timetable td {
+    padding: 6px;
+    font-size: 12px;
+  }
+}
