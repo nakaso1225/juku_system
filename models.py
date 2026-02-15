@@ -51,6 +51,124 @@ def list_students() -> list[dict[str, Any]]:
     return [dict(row) for row in rows]
 
 
+def get_teacher_panel(student_id: int, teacher_id: int | None = None) -> dict[str, Any]:
+    conn = get_connection()
+
+    teachers = conn.execute(
+        """
+        SELECT
+            t.id AS teacher_id,
+            t.name,
+            COALESCE(sc.student_assignment_count, 0) AS student_assignment_count
+        FROM teachers t
+        LEFT JOIN (
+            SELECT teacher_id, COUNT(*) AS student_assignment_count
+            FROM assignments
+            WHERE student_id = ?
+            GROUP BY teacher_id
+        ) sc ON sc.teacher_id = t.id
+        ORDER BY
+            CASE WHEN COALESCE(sc.student_assignment_count, 0) > 0 THEN 0 ELSE 1 END ASC,
+            CASE WHEN t.name_kana IS NULL OR t.name_kana = '' THEN t.name ELSE t.name_kana END ASC
+        """,
+        (student_id,),
+    ).fetchall()
+
+    teacher_list = [
+        {
+            "teacher_id": row["teacher_id"],
+            "name": row["name"],
+            "student_assignment_count": row["student_assignment_count"],
+            "is_registered_for_student": row["student_assignment_count"] > 0,
+        }
+        for row in teachers
+    ]
+
+    if not teacher_list:
+        conn.close()
+        return {"teachers": [], "selected_teacher_id": None, "assignments": [], "availability": []}
+
+    teacher_ids = {t["teacher_id"] for t in teacher_list}
+    selected_teacher_id = teacher_id if teacher_id in teacher_ids else teacher_list[0]["teacher_id"]
+
+    assignment_rows = conn.execute(
+        """
+        SELECT
+            a.id,
+            a.date,
+            a.period,
+            a.subject,
+            a.table_id,
+            s.id AS student_id,
+            s.name AS student_name,
+            EXISTS (
+                SELECT 1
+                FROM assignments a2
+                WHERE a2.date = a.date
+                  AND a2.period = a.period
+                  AND a2.teacher_id = a.teacher_id
+                  AND a2.student_id != a.student_id
+            ) AS has_teacher_conflict,
+            EXISTS (
+                SELECT 1
+                FROM assignments a3
+                WHERE a3.date = a.date
+                  AND a3.period = a.period
+                  AND a3.table_id = a.table_id
+                  AND a3.student_id != a.student_id
+            ) AS has_table_conflict,
+            NOT EXISTS (
+                SELECT 1
+                FROM student_availability sa
+                WHERE sa.student_id = a.student_id
+                  AND sa.date = a.date
+                  AND sa.period = a.period
+            ) AS has_student_schedule_mismatch
+        FROM assignments a
+        JOIN students s ON s.id = a.student_id
+        WHERE a.teacher_id = ?
+        ORDER BY a.date, a.period, s.name
+        """,
+        (selected_teacher_id,),
+    ).fetchall()
+    availability_rows = conn.execute(
+        """
+        SELECT date, period
+        FROM teacher_availability
+        WHERE teacher_id = ?
+        """,
+        (selected_teacher_id,),
+    ).fetchall()
+    subject_rows = conn.execute(
+        """
+        SELECT subject
+        FROM teacher_subjects
+        WHERE teacher_id = ?
+        ORDER BY subject
+        """,
+        (selected_teacher_id,),
+    ).fetchall()
+
+    conn.close()
+    return {
+        "teachers": teacher_list,
+        "selected_teacher_id": selected_teacher_id,
+        "assignments": [
+            {
+                **dict(r),
+                "has_conflict": bool(
+                    r["has_teacher_conflict"]
+                    or r["has_table_conflict"]
+                    or r["has_student_schedule_mismatch"]
+                ),
+            }
+            for r in assignment_rows
+        ],
+        "availability": [dict(r) for r in availability_rows],
+        "subjects": [r["subject"] for r in subject_rows],
+    }
+
+
 def get_student_timetable(student_id: int) -> dict[str, Any] | None:
     conn = get_connection()
     student = conn.execute(
@@ -83,6 +201,7 @@ def get_student_timetable(student_id: int) -> dict[str, Any] | None:
                   AND a2.period = a.period
                   AND a2.teacher_id = a.teacher_id
                   AND a2.student_id != a.student_id
+                  AND a.teacher_id IS NOT NULL
             ) AS has_teacher_conflict,
             EXISTS (
                 SELECT 1
@@ -92,19 +211,27 @@ def get_student_timetable(student_id: int) -> dict[str, Any] | None:
                   AND a3.table_id = a.table_id
                   AND a3.student_id != a.student_id
             ) AS has_table_conflict,
-            NOT EXISTS (
-                SELECT 1
-                FROM teacher_availability ta
-                WHERE ta.teacher_id = a.teacher_id
-                  AND ta.date = a.date
-                  AND ta.period = a.period
-            ) AS has_schedule_mismatch_slot,
-            NOT EXISTS (
-                SELECT 1
-                FROM teacher_subjects ts
-                WHERE ts.teacher_id = a.teacher_id
-                  AND ts.subject = a.subject
-            ) AS has_schedule_mismatch_subject,
+            CASE
+                WHEN a.teacher_id IS NULL THEN 0
+                WHEN NOT EXISTS (
+                    SELECT 1
+                    FROM teacher_availability ta
+                    WHERE ta.teacher_id = a.teacher_id
+                      AND ta.date = a.date
+                      AND ta.period = a.period
+                ) THEN 1
+                ELSE 0
+            END AS has_schedule_mismatch_slot,
+            CASE
+                WHEN a.teacher_id IS NULL THEN 0
+                WHEN NOT EXISTS (
+                    SELECT 1
+                    FROM teacher_subjects ts
+                    WHERE ts.teacher_id = a.teacher_id
+                      AND ts.subject = a.subject
+                ) THEN 1
+                ELSE 0
+            END AS has_schedule_mismatch_subject,
             NOT EXISTS (
                 SELECT 1
                 FROM student_availability sa
@@ -113,7 +240,7 @@ def get_student_timetable(student_id: int) -> dict[str, Any] | None:
                   AND sa.period = a.period
             ) AS has_student_schedule_mismatch
         FROM assignments a
-        JOIN teachers t ON t.id = a.teacher_id
+        LEFT JOIN teachers t ON t.id = a.teacher_id
         WHERE a.student_id = ?
         ORDER BY a.date, a.period
         """,
@@ -152,7 +279,7 @@ def get_student_timetable(student_id: int) -> dict[str, Any] | None:
                 "subject": row["subject"],
                 "teacher_id": row["teacher_id"],
                 "table_id": row["table_id"],
-                "teacher_name": row["teacher_name"],
+                "teacher_name": row["teacher_name"] if row["teacher_name"] else "講師未定",
                 "has_teacher_conflict": bool(row["has_teacher_conflict"]),
                 "has_table_conflict": bool(row["has_table_conflict"]),
                 "has_schedule_mismatch": bool(
@@ -290,7 +417,7 @@ def get_used_tables(*, date: str, period: int) -> list[str]:
 def create_assignment(
     *,
     student_id: int,
-    teacher_id: int,
+    teacher_id: int | None,
     table_id: str,
     subject: str,
     date: str,
@@ -317,19 +444,22 @@ def create_assignment(
     )
     assignment_id = cur.lastrowid
 
-    has_teacher_conflict = cur.execute(
-        """
-        SELECT EXISTS(
-            SELECT 1
-            FROM assignments
-            WHERE date = ?
-              AND period = ?
-              AND teacher_id = ?
-              AND student_id != ?
-        )
-        """,
-        (date, period, teacher_id, student_id),
-    ).fetchone()[0]
+    if teacher_id is None:
+        has_teacher_conflict = 0
+    else:
+        has_teacher_conflict = cur.execute(
+            """
+            SELECT EXISTS(
+                SELECT 1
+                FROM assignments
+                WHERE date = ?
+                  AND period = ?
+                  AND teacher_id = ?
+                  AND student_id != ?
+            )
+            """,
+            (date, period, teacher_id, student_id),
+        ).fetchone()[0]
 
     has_table_conflict = cur.execute(
         """

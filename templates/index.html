@@ -30,10 +30,43 @@
         <div id="flash-message" class="flash hidden"></div>
       </header>
 
+      <section id="context-bar" class="context-bar">
+        <span id="context-student" class="context-student">生徒未選択</span>
+        <span class="context-sep">/</span>
+        <span id="context-subject" class="context-subject">科目未選択</span>
+      </section>
+
       <section id="conflict-bar" class="conflict-bar hidden"></section>
 
       <section class="grid-wrap">
         <table id="timetable"></table>
+      </section>
+
+      <section class="teacher-panel">
+        <button id="teacher-panel-toggle" class="teacher-panel-toggle" type="button">講師カレンダーを表示</button>
+        <div id="teacher-panel-body" class="teacher-panel-body hidden">
+          <div class="teacher-panel-header">
+            <label for="teacher-combo">講師カレンダー:</label>
+            <div class="teacher-picker">
+              <div class="teacher-search-wrap">
+                <input
+                  id="teacher-combo"
+                  class="teacher-search"
+                  type="text"
+                  placeholder="講師名を入力して選択"
+                />
+                <button id="teacher-clear-btn" class="clear-btn" type="button" aria-label="検索文字を消す">
+                  ×
+                </button>
+              </div>
+              <div id="teacher-dropdown" class="teacher-dropdown hidden"></div>
+            </div>
+          </div>
+          <div id="teacher-subjects" class="teacher-subjects"></div>
+          <div class="teacher-grid-wrap">
+            <table id="teacher-timetable"></table>
+          </div>
+        </div>
       </section>
     </main>
 

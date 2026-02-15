@@ -114,7 +114,7 @@ def init_db() -> None:
         CREATE TABLE IF NOT EXISTS assignments (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             student_id INTEGER NOT NULL,
-            teacher_id INTEGER NOT NULL,
+            teacher_id INTEGER,
             table_id TEXT NOT NULL DEFAULT 'A',
             subject TEXT NOT NULL,
             date TEXT NOT NULL,
@@ -166,6 +166,9 @@ def init_db() -> None:
     assignment_cols = {
         row["name"] for row in cur.execute("PRAGMA table_info(assignments)").fetchall()
     }
+    assignment_info = {
+        row["name"]: row for row in cur.execute("PRAGMA table_info(assignments)").fetchall()
+    }
     if "table_id" not in assignment_cols:
         cur.execute("ALTER TABLE assignments ADD COLUMN table_id TEXT")
         cur.execute(
@@ -180,10 +183,52 @@ def init_db() -> None:
         )
         cur.execute("UPDATE assignments SET table_id = 'A' WHERE table_id IS NULL OR table_id = ''")
 
+    # Migrate old schema: assignments.teacher_id NOT NULL -> NULL allowed (for "講師未定").
+    teacher_col = assignment_info.get("teacher_id")
+    if teacher_col and int(teacher_col["notnull"]) == 1:
+        cur.execute("PRAGMA foreign_keys = OFF")
+        cur.execute(
+            """
+            CREATE TABLE IF NOT EXISTS assignments_new (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                student_id INTEGER NOT NULL,
+                teacher_id INTEGER,
+                table_id TEXT NOT NULL DEFAULT 'A',
+                subject TEXT NOT NULL,
+                date TEXT NOT NULL,
+                period INTEGER NOT NULL,
+                FOREIGN KEY (student_id) REFERENCES students(id),
+                FOREIGN KEY (teacher_id) REFERENCES teachers(id)
+            )
+            """
+        )
+        cur.execute(
+            """
+            INSERT INTO assignments_new(id, student_id, teacher_id, table_id, subject, date, period)
+            SELECT id, student_id, teacher_id, COALESCE(table_id, 'A'), subject, date, period
+            FROM assignments
+            """
+        )
+        cur.execute("DROP TABLE assignments")
+        cur.execute("ALTER TABLE assignments_new RENAME TO assignments")
+        cur.execute("PRAGMA foreign_keys = ON")
+
     cur.execute(
         """
         CREATE INDEX IF NOT EXISTS idx_assignments_slot_table
             ON assignments(date, period, table_id)
+        """
+    )
+    cur.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_assignments_slot_teacher
+            ON assignments(date, period, teacher_id)
+        """
+    )
+    cur.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_assignments_student_teacher
+            ON assignments(student_id, teacher_id)
         """
     )
 

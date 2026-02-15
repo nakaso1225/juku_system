@@ -2,6 +2,9 @@ from __future__ import annotations
 
 from pathlib import Path
 import os
+import signal
+import webbrowser
+from threading import Timer
 
 from flask import Flask, jsonify, render_template, request
 
@@ -19,6 +22,7 @@ from models import (
     create_assignment,
     delete_assignment,
     get_available_teachers,
+    get_teacher_panel,
     get_slot_teacher_summary,
     get_student_timetable,
     get_used_tables,
@@ -106,6 +110,27 @@ def api_student_timetable(student_id: int):
     return jsonify(data)
 
 
+@app.route("/api/teacher-panel")
+def api_teacher_panel():
+    student_id_raw = request.args.get("student_id", "")
+    teacher_id_raw = request.args.get("teacher_id", "")
+    if not student_id_raw:
+        return jsonify({"error": "student_id is required"}), 400
+    try:
+        student_id = int(student_id_raw)
+    except ValueError:
+        return jsonify({"error": "invalid student_id"}), 400
+
+    teacher_id = None
+    if teacher_id_raw:
+        try:
+            teacher_id = int(teacher_id_raw)
+        except ValueError:
+            return jsonify({"error": "invalid teacher_id"}), 400
+
+    return jsonify(get_teacher_panel(student_id=student_id, teacher_id=teacher_id))
+
+
 @app.route("/api/available-teachers")
 def api_available_teachers():
     date = request.args.get("date", "")
@@ -160,15 +185,17 @@ def api_used_tables():
 @app.route("/api/assignments", methods=["POST"])
 def api_create_assignment():
     payload = request.get_json(silent=True) or {}
-    required = ["student_id", "teacher_id", "table_id", "subject", "date", "period"]
+    required = ["student_id", "table_id", "subject", "date", "period"]
     missing = [key for key in required if key not in payload]
     if missing:
         return jsonify({"error": f"missing fields: {', '.join(missing)}"}), 400
 
     try:
+        teacher_id_raw = payload.get("teacher_id")
+        teacher_id = None if teacher_id_raw in (None, "", "null") else int(teacher_id_raw)
         result = create_assignment(
             student_id=int(payload["student_id"]),
-            teacher_id=int(payload["teacher_id"]),
+            teacher_id=teacher_id,
             table_id=str(payload["table_id"]),
             subject=str(payload["subject"]),
             date=str(payload["date"]),
@@ -348,5 +375,39 @@ def api_sync_upload_apply():
     )
 
 
+@app.route("/api/shutdown", methods=["POST"])
+def api_shutdown():
+    remote = request.remote_addr or ""
+    if remote not in {"127.0.0.1", "::1"}:
+        return jsonify({"error": "forbidden"}), 403
+
+    shutdown = request.environ.get("werkzeug.server.shutdown")
+    if shutdown is not None:
+        shutdown()
+        return jsonify({"ok": True, "mode": "werkzeug"})
+
+    # Fallback: Flask/Werkzeugの起動形態によってはshutdownハンドラが無い。
+    # その場合は子プロセス/親プロセスをSIGTERMで終了する。
+    def _fallback_terminate() -> None:
+        try:
+            if os.environ.get("WERKZEUG_RUN_MAIN") == "true":
+                parent_pid = os.getppid()
+                if parent_pid > 1:
+                    os.kill(parent_pid, signal.SIGTERM)
+        except Exception:
+            pass
+        try:
+            os.kill(os.getpid(), signal.SIGTERM)
+        except Exception:
+            pass
+
+    Timer(0.2, _fallback_terminate).start()
+    return jsonify({"ok": True, "mode": "fallback"})
+
+
 if __name__ == "__main__":
+    # デバッグ時のリローダーで二重起動しないよう、実行プロセス側でのみ開く
+    if os.environ.get("WERKZEUG_RUN_MAIN") == "true":
+        Timer(1.0, lambda: webbrowser.open("http://127.0.0.1:5000/")).start()
+
     app.run(debug=True)

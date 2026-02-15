@@ -3,7 +3,10 @@ const state = {
   students: [],
   selectedStudentId: null,
   selectedSubject: null,
+  selectedTeacherId: null,
+  isTeacherPanelOpen: false,
   timetable: null,
+  teacherPanel: null,
   conflicts: [],
   slotSummary: [],
   selectedSlot: null,
@@ -195,6 +198,7 @@ async function loadTimetable() {
     };
     state.conflicts = [];
     state.slotSummary = [];
+    state.teacherPanel = { teachers: [], selected_teacher_id: null, assignments: [], availability: [] };
     render();
     return;
   }
@@ -215,6 +219,7 @@ async function loadTimetable() {
   state.conflicts = await api("/api/conflicts");
   if (!state.selectedSubject) {
     state.slotSummary = [];
+    await loadTeacherPanel();
     render();
     return;
   }
@@ -223,13 +228,63 @@ async function loadTimetable() {
       state.selectedSubject
     )}&student_id=${state.selectedStudentId}`
   );
+  await loadTeacherPanel();
   render();
 }
 
+async function loadTeacherPanel() {
+  if (!state.selectedStudentId) {
+    state.teacherPanel = { teachers: [], selected_teacher_id: null, assignments: [], availability: [] };
+    state.selectedTeacherId = null;
+    return;
+  }
+  const teacherQuery = state.selectedTeacherId ? `&teacher_id=${state.selectedTeacherId}` : "";
+  state.teacherPanel = await api(
+    `/api/teacher-panel?student_id=${state.selectedStudentId}${teacherQuery}`
+  );
+  state.selectedTeacherId = state.teacherPanel.selected_teacher_id || null;
+  const combo = document.getElementById("teacher-combo");
+  if (combo) {
+    const selected = (state.teacherPanel.teachers || []).find(
+      (t) => t.teacher_id === state.selectedTeacherId
+    );
+    combo.value = selected ? selected.name : "";
+  }
+}
+
 function render() {
+  renderContextBar();
   renderCounts();
   renderConflictBar();
   renderGrid();
+  renderTeacherPanel();
+}
+
+function colorForStudent(studentId) {
+  const base = Number(studentId || 0);
+  const hue = (base * 47 + 160) % 360;
+  return {
+    bg: `hsl(${hue} 58% 92%)`,
+    border: `hsl(${hue} 42% 76%)`,
+    text: `hsl(${hue} 55% 20%)`,
+  };
+}
+
+function renderContextBar() {
+  const bar = document.getElementById("context-bar");
+  const studentEl = document.getElementById("context-student");
+  const subjectEl = document.getElementById("context-subject");
+  if (!bar || !studentEl || !subjectEl) return;
+
+  const studentName = state.timetable?.student?.name || "生徒未選択";
+  const subjectName = state.selectedSubject || "科目未選択";
+  studentEl.textContent = studentName;
+  subjectEl.textContent = subjectName;
+
+  const c = colorForStudent(state.selectedStudentId);
+  bar.style.background = c.bg;
+  bar.style.borderColor = c.border;
+  bar.style.color = c.text;
 }
 
 function renderCounts() {
@@ -322,6 +377,23 @@ async function jumpToConflictStudent(date, period, studentName) {
   await openTeacherModal(date, period, assignment);
 }
 
+async function jumpToStudentFromTeacherPanel(studentName) {
+  const targetStudent = (state.students || []).find((s) => s.name === studentName);
+  if (!targetStudent) {
+    showFlash(`生徒が見つかりません: ${studentName}`, "error");
+    return;
+  }
+  state.selectedStudentId = targetStudent.id;
+  const combo = document.getElementById("student-combo");
+  if (combo) combo.value = targetStudent.name;
+  updateStudentPlaceholder();
+  await loadTimetable();
+  const topGrid = document.querySelector(".grid-wrap");
+  if (topGrid) {
+    topGrid.scrollIntoView({ behavior: "smooth", block: "start" });
+  }
+}
+
 function renderGrid() {
   const table = document.getElementById("timetable");
   const dates = state.meta.dates;
@@ -335,11 +407,13 @@ function renderGrid() {
   for (const a of state.timetable.assignments) {
     assignmentMap.set(`${a.date}#${a.period}`, a);
   }
-  const hasOpenTeacherSet = new Set(
-    state.slotSummary
-      .filter((s) => Number(s.free_teacher_count) > 0)
-      .map((s) => `${s.date}#${s.period}`)
-  );
+  const slotSummaryMap = new Map();
+  for (const s of state.slotSummary || []) {
+    slotSummaryMap.set(`${s.date}#${s.period}`, {
+      free: Number(s.free_teacher_count || 0),
+      total: Number(s.total_teacher_count || 0),
+    });
+  }
 
   table.innerHTML = "";
 
@@ -388,11 +462,20 @@ function renderGrid() {
         td.addEventListener("click", () => openTeacherModal(date, period, assignment));
       } else if (!available) {
         td.classList.add("unavailable");
-        td.textContent = "×";
-      } else {
-        if (hasOpenTeacherSet.has(key)) {
-          td.classList.add("has-open-teacher");
+        td.textContent = "";
+      } else if (state.selectedSubject) {
+        const summary = slotSummaryMap.get(key) || { free: 0, total: 0 };
+        if (summary.free > 0) {
+          td.classList.add("available-empty", "has-open-teacher");
+          td.innerHTML = `<div class="cell-hint">${summary.free}人対応可</div>`;
+          td.addEventListener("click", () => openTeacherModal(date, period, null));
+        } else {
+          td.classList.add("no-teacher", "no-teacher-clickable");
+          td.innerHTML = `<div class="cell-hint mute">対応講師なし</div>`;
+          td.addEventListener("click", () => openTeacherModal(date, period, null));
         }
+      } else {
+        td.classList.add("available-empty");
         td.addEventListener("click", () => openTeacherModal(date, period, null));
       }
 
@@ -401,6 +484,188 @@ function renderGrid() {
 
     table.appendChild(tr);
   }
+}
+
+function renderTeacherPanel() {
+  const combo = document.getElementById("teacher-combo");
+  const body = document.getElementById("teacher-panel-body");
+  if (!combo || !body) return;
+  body.classList.toggle("hidden", !state.isTeacherPanelOpen);
+  updateTeacherPanelToggleLabel();
+  if (!state.isTeacherPanelOpen) return;
+  const filterText = combo.value || "";
+  renderTeacherOptions(filterText);
+  updateTeacherPlaceholder();
+  renderTeacherSubjects();
+  renderTeacherGrid();
+}
+
+function renderTeacherSubjects() {
+  const box = document.getElementById("teacher-subjects");
+  if (!box) return;
+  const subjects = (state.teacherPanel && state.teacherPanel.subjects) || [];
+  if (!subjects.length) {
+    box.textContent = "担当科目: なし";
+    return;
+  }
+  box.textContent = `担当科目: ${subjects.join(" / ")}`;
+}
+
+function updateTeacherPanelToggleLabel() {
+  const btn = document.getElementById("teacher-panel-toggle");
+  if (!btn) return;
+  if (!state.isTeacherPanelOpen) {
+    btn.textContent = "講師カレンダーを表示";
+    return;
+  }
+  const teachers = (state.teacherPanel && state.teacherPanel.teachers) || [];
+  const selected = teachers.find((t) => t.teacher_id === state.selectedTeacherId);
+  btn.textContent = selected
+    ? `講師カレンダーを隠す（${selected.name}）`
+    : "講師カレンダーを隠す";
+}
+
+function renderTeacherOptions(filterText) {
+  const dropdown = document.getElementById("teacher-dropdown");
+  if (!dropdown) return;
+  const teachers = (state.teacherPanel && state.teacherPanel.teachers) || [];
+  const keyword = (filterText || "").trim();
+  const filtered = keyword ? teachers.filter((t) => t.name.includes(keyword)) : teachers;
+  const registered = filtered.filter((t) => t.is_registered_for_student);
+  const others = filtered.filter((t) => !t.is_registered_for_student);
+
+  dropdown.innerHTML = "";
+  const appendGroup = (title, list) => {
+    if (!list.length) return;
+    const label = document.createElement("div");
+    label.className = "teacher-group-label";
+    label.textContent = title;
+    dropdown.appendChild(label);
+    for (const teacher of list) {
+      const row = document.createElement("div");
+      row.className = "teacher-option";
+      const suffix = teacher.student_assignment_count > 0 ? `（${teacher.student_assignment_count}回）` : "";
+      row.textContent = `${teacher.name}${suffix}`;
+      row.addEventListener("mousedown", async (e) => {
+        e.preventDefault();
+        state.selectedTeacherId = teacher.teacher_id;
+        const teacherCombo = document.getElementById("teacher-combo");
+        if (teacherCombo) teacherCombo.value = teacher.name;
+        hideTeacherDropdown();
+        await loadTeacherPanel();
+        renderTeacherPanel();
+      });
+      dropdown.appendChild(row);
+    }
+  };
+
+  appendGroup("この生徒で登録済み講師", registered);
+  appendGroup("その他の講師", others);
+  if (!registered.length && !others.length) {
+    const empty = document.createElement("div");
+    empty.className = "teacher-option";
+    empty.textContent = "該当なし";
+    dropdown.appendChild(empty);
+  }
+}
+
+function renderTeacherGrid() {
+  const table = document.getElementById("teacher-timetable");
+  if (!table || !state.meta) return;
+  const panel = state.teacherPanel || { assignments: [], availability: [] };
+  const availabilitySet = new Set((panel.availability || []).map((a) => `${a.date}#${a.period}`));
+  const assignmentMap = new Map();
+  const conflictSlotSet = new Set();
+  for (const a of panel.assignments || []) {
+    const key = `${a.date}#${a.period}`;
+    if (!assignmentMap.has(key)) assignmentMap.set(key, []);
+    assignmentMap.get(key).push(a.student_name);
+    if (a.has_conflict) conflictSlotSet.add(key);
+  }
+
+  table.innerHTML = "";
+  const headTr = document.createElement("tr");
+  const topLeft = document.createElement("th");
+  topLeft.textContent = "時限";
+  headTr.appendChild(topLeft);
+  for (const date of state.meta.dates) {
+    const th = document.createElement("th");
+    th.textContent = formatDate(date);
+    headTr.appendChild(th);
+  }
+  table.appendChild(headTr);
+
+  for (const period of state.meta.periods) {
+    const tr = document.createElement("tr");
+    const label = document.createElement("th");
+    label.textContent = state.meta.period_labels[String(period)] || `${period}限`;
+    tr.appendChild(label);
+
+    for (const date of state.meta.dates) {
+      const td = document.createElement("td");
+      td.className = "teacher-cell";
+      const key = `${date}#${period}`;
+      const names = assignmentMap.get(key) || [];
+      const available = availabilitySet.has(key);
+      if (names.length > 0) {
+        td.classList.add("assigned");
+        if (conflictSlotSet.has(key)) {
+          td.classList.add("conflict");
+        }
+        td.innerHTML = "";
+        names.forEach((name, idx) => {
+          const btn = document.createElement("button");
+          btn.type = "button";
+          btn.className = "teacher-cell-student";
+          btn.textContent = name;
+          btn.addEventListener("click", async () => {
+            await jumpToStudentFromTeacherPanel(name);
+          });
+          td.appendChild(btn);
+          if (idx < names.length - 1) {
+            const sep = document.createElement("span");
+            sep.className = "teacher-cell-sep";
+            sep.textContent = " / ";
+            td.appendChild(sep);
+          }
+        });
+      } else if (!available) {
+        td.classList.add("unavailable");
+        td.textContent = "×";
+      } else {
+        td.textContent = "";
+      }
+      tr.appendChild(td);
+    }
+    table.appendChild(tr);
+  }
+}
+
+function showTeacherDropdown() {
+  const dropdown = document.getElementById("teacher-dropdown");
+  if (!dropdown) return;
+  dropdown.classList.remove("hidden");
+}
+
+function hideTeacherDropdown() {
+  const dropdown = document.getElementById("teacher-dropdown");
+  if (!dropdown) return;
+  dropdown.classList.add("hidden");
+}
+
+function isTeacherDropdownVisible() {
+  const dropdown = document.getElementById("teacher-dropdown");
+  return !!dropdown && !dropdown.classList.contains("hidden");
+}
+
+function updateTeacherPlaceholder() {
+  const combo = document.getElementById("teacher-combo");
+  if (!combo) return;
+  const teachers = (state.teacherPanel && state.teacherPanel.teachers) || [];
+  const selected = teachers.find((t) => t.teacher_id === state.selectedTeacherId);
+  combo.placeholder = selected
+    ? `現在: ${selected.name}（入力して検索）`
+    : "講師名を入力して選択";
 }
 
 async function openTeacherModal(date, period, existingAssignment) {
@@ -481,6 +746,8 @@ async function openTeacherModal(date, period, existingAssignment) {
   if (existingAssignment) {
     removeBtn.classList.remove("hidden");
     removeBtn.onclick = async () => {
+      const ok = await showConfirmModal("この割り当てを解除しますか？");
+      if (!ok) return;
       await api(`/api/assignments/${existingAssignment.id}`, { method: "DELETE" });
       closeModal();
       await loadTimetable();
@@ -591,6 +858,10 @@ function bindEvents() {
   const studentClearBtn = document.getElementById("student-clear-btn");
   const studentDropdown = document.getElementById("student-dropdown");
   const subjectSelect = document.getElementById("subject-select");
+  const teacherCombo = document.getElementById("teacher-combo");
+  const teacherClearBtn = document.getElementById("teacher-clear-btn");
+  const teacherDropdown = document.getElementById("teacher-dropdown");
+  const teacherPanelToggleBtn = document.getElementById("teacher-panel-toggle");
   const cancelBtn = document.getElementById("cancel-modal-btn");
   const modal = document.getElementById("teacher-modal");
   const syncBtn = document.getElementById("sync-upload-btn");
@@ -655,6 +926,68 @@ function bindEvents() {
     });
   }
 
+  const resolveTeacherFromInput = async (text) => {
+    const value = (text || "").trim();
+    if (!value) return;
+    const teachers = (state.teacherPanel && state.teacherPanel.teachers) || [];
+    const exact = teachers.find((t) => t.name === value);
+    const target = exact || teachers.find((t) => t.name.includes(value));
+    if (!target) return;
+    if (target.teacher_id === state.selectedTeacherId) return;
+    state.selectedTeacherId = target.teacher_id;
+    if (teacherCombo) teacherCombo.value = target.name;
+    updateTeacherPlaceholder();
+    await loadTeacherPanel();
+    renderTeacherPanel();
+  };
+
+  if (teacherCombo) {
+    teacherCombo.addEventListener("focus", () => {
+      renderTeacherOptions(teacherCombo.value);
+      showTeacherDropdown();
+    });
+    teacherCombo.addEventListener("input", () => {
+      renderTeacherOptions(teacherCombo.value);
+      showTeacherDropdown();
+    });
+    teacherCombo.addEventListener("change", async (e) => {
+      await resolveTeacherFromInput(e.target.value);
+    });
+    teacherCombo.addEventListener("keydown", async (e) => {
+      if (e.key === "Enter") {
+        await resolveTeacherFromInput(e.target.value);
+        hideTeacherDropdown();
+      }
+      if (e.key === "Escape") hideTeacherDropdown();
+    });
+    teacherCombo.addEventListener("blur", () => {
+      setTimeout(() => hideTeacherDropdown(), 100);
+    });
+  }
+  if (teacherClearBtn) {
+    teacherClearBtn.addEventListener("click", () => {
+      if (!teacherCombo) return;
+      teacherCombo.value = "";
+      renderTeacherOptions("");
+      if (isTeacherDropdownVisible()) {
+        hideTeacherDropdown();
+      } else {
+        showTeacherDropdown();
+      }
+      updateTeacherPlaceholder();
+      teacherCombo.focus();
+    });
+  }
+  if (teacherDropdown) {
+    teacherDropdown.addEventListener("mousedown", (e) => e.preventDefault());
+  }
+  if (teacherPanelToggleBtn) {
+    teacherPanelToggleBtn.addEventListener("click", () => {
+      state.isTeacherPanelOpen = !state.isTeacherPanelOpen;
+      renderTeacherPanel();
+    });
+  }
+
   if (cancelBtn) {
     cancelBtn.addEventListener("click", closeModal);
   }
@@ -673,7 +1006,30 @@ function bindEvents() {
   }
 }
 
+function bindAutoShutdownOnTabClose() {
+  const notifyShutdown = () => {
+    try {
+      if (navigator.sendBeacon) {
+        navigator.sendBeacon("/api/shutdown", "");
+      } else {
+        fetch("/api/shutdown", { method: "POST", keepalive: true }).catch(() => {});
+      }
+    } catch (_) {
+      // no-op
+    }
+  };
+
+  window.addEventListener("pagehide", (e) => {
+    if (e.persisted) return;
+    notifyShutdown();
+  });
+  window.addEventListener("beforeunload", () => {
+    notifyShutdown();
+  });
+}
+
 async function main() {
+  bindAutoShutdownOnTabClose();
   bindEvents();
   await loadBaseData();
   await loadTimetable();
