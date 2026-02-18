@@ -1,6 +1,7 @@
 const state = {
   meta: null,
   students: [],
+  studentNotes: [],
   selectedStudentId: null,
   selectedSubject: null,
   selectedTeacherId: null,
@@ -13,18 +14,30 @@ const state = {
 };
 
 let flashTimer = null;
+let tabHeartbeatTimer = null;
+let tabCloseNotified = false;
+let editingStudentNoteId = null;
+let isStudentTrashOpen = false;
+let studentDropdownOptions = [];
+let activeStudentOptionIndex = -1;
+const assignmentUndoStack = [];
+const assignmentRedoStack = [];
+let isApplyingAssignmentHistory = false;
+const TAB_ID_KEY = "juku_scheduler_tab_id";
+const STUDENT_STATUS_ADJUSTING = "調整中";
+const STUDENT_STATUS_COMPLETE = "完了";
 
 const subjectAbbrevRules = [
+  [/物理/, "物"],
+  [/化学/, "化"],
+  [/生物/, "生"],
+  [/地学/, "地"],
   [/算数/, "算"],
   [/数学/, "M"],
   [/英語/, "E"],
   [/国語/, "国"],
   [/理科/, "理"],
   [/社会/, "社"],
-  [/物理/, "物"],
-  [/化学/, "化"],
-  [/生物/, "生"],
-  [/地学/, "地"],
   [/現代文/, "現"],
   [/古文/, "古"],
   [/漢文/, "漢"],
@@ -41,6 +54,48 @@ function subjectAbbrev(subject) {
     if (regex.test(subject)) return label;
   }
   return "他";
+}
+
+function subjectTone(subject) {
+  if (/物理/.test(subject)) return "science-physics";
+  if (/化学/.test(subject)) return "science-chemistry";
+  if (/生物/.test(subject)) return "science-biology";
+  if (/地学/.test(subject)) return "science-earth";
+  if (/算数|数学/.test(subject)) return "math";
+  if (/英語/.test(subject)) return "english";
+  if (/国語|現代文|古文|漢文/.test(subject)) return "japanese";
+  if (/理科/.test(subject)) return "science";
+  if (/社会|日本史|世界史|地理|倫政|公共/.test(subject)) return "social";
+  if (/情報/.test(subject)) return "informatics";
+  return "other";
+}
+
+function getOrCreateTabId() {
+  const existing = sessionStorage.getItem(TAB_ID_KEY);
+  if (existing) return existing;
+  const newId =
+    (window.crypto && window.crypto.randomUUID && window.crypto.randomUUID()) ||
+    `tab-${Date.now()}-${Math.random().toString(16).slice(2)}`;
+  sessionStorage.setItem(TAB_ID_KEY, newId);
+  return newId;
+}
+
+function colorForStudentRef(ref) {
+  let base = 0;
+  if (typeof ref === "number" && Number.isFinite(ref)) {
+    base = ref * 47 + 160;
+  } else {
+    const text = String(ref || "");
+    for (let i = 0; i < text.length; i += 1) {
+      base = (base * 31 + text.charCodeAt(i)) % 3600;
+    }
+  }
+  const hue = base % 360;
+  return {
+    bg: `hsl(${hue} 72% 94%)`,
+    border: `hsl(${hue} 62% 48%)`,
+    text: `hsl(${hue} 45% 22%)`,
+  };
 }
 
 function formatDate(isoDate) {
@@ -66,7 +121,11 @@ async function api(path, options = {}) {
   return null;
 }
 
-async function loadBaseData() {
+async function loadBaseData(options = {}) {
+  const { preserveSelection = false } = options;
+  const previousStudentId = state.selectedStudentId;
+  const previousSubject = state.selectedSubject;
+
   state.meta = await api("/api/meta");
   state.students = await api("/api/students");
 
@@ -76,45 +135,102 @@ async function loadBaseData() {
   renderStudentOptions("");
 
   if (state.students.length > 0) {
-    state.selectedStudentId = state.students[0].id;
-    if (studentCombo) studentCombo.value = state.students[0].name;
+    const selectedStudent =
+      (preserveSelection && state.students.find((s) => s.id === previousStudentId)) ||
+      state.students[0];
+    state.selectedStudentId = selectedStudent.id;
+    if (studentCombo) studentCombo.value = selectedStudent.name;
   } else {
     state.selectedStudentId = null;
     if (studentCombo) studentCombo.value = "";
   }
   updateStudentPlaceholder();
-  state.selectedSubject = state.meta.subjects[0] || null;
+  const canKeepSubject =
+    preserveSelection &&
+    previousSubject &&
+    (state.meta.subjects || []).includes(previousSubject);
+  state.selectedSubject = canKeepSubject ? previousSubject : state.meta.subjects[0] || null;
   buildSubjectSelect([]);
-  subjectSelect.value = state.selectedSubject;
+  if (subjectSelect) subjectSelect.value = state.selectedSubject || "";
 }
 
-function renderStudentOptions(filterText) {
+function setActiveStudentOption(index) {
+  const dropdown = document.getElementById("student-dropdown");
+  if (!dropdown) return;
+  const optionEls = Array.from(dropdown.querySelectorAll('[data-student-option="1"]'));
+  optionEls.forEach((el) => el.classList.remove("student-option-active"));
+
+  if (!optionEls.length) {
+    activeStudentOptionIndex = -1;
+    return;
+  }
+  if (index < 0 || index >= optionEls.length) {
+    activeStudentOptionIndex = -1;
+    return;
+  }
+
+  activeStudentOptionIndex = index;
+  const activeEl = optionEls[index];
+  activeEl.classList.add("student-option-active");
+  activeEl.scrollIntoView({ block: "nearest" });
+}
+
+async function selectStudentFromDropdown(student) {
+  if (!student) return;
+  const combo = document.getElementById("student-combo");
+  if (combo) combo.value = student.name;
+  if (student.id === state.selectedStudentId) {
+    hideStudentDropdown();
+    return;
+  }
+  state.selectedStudentId = student.id;
+  updateStudentPlaceholder();
+  hideStudentDropdown();
+  await loadTimetable();
+}
+
+function renderStudentOptions(filterText, options = {}) {
+  const { activateSelected = false } = options;
   const dropdown = document.getElementById("student-dropdown");
   if (!dropdown) return;
   const keyword = (filterText || "").trim();
   const list = keyword
     ? state.students.filter((s) => s.name.includes(keyword))
     : state.students;
+  studentDropdownOptions = list;
+  activeStudentOptionIndex = -1;
   dropdown.innerHTML = "";
   for (const student of list) {
     const row = document.createElement("div");
     row.className = "student-option";
-    row.textContent = student.name;
+    row.dataset.studentOption = "1";
+
+    const nameEl = document.createElement("span");
+    nameEl.className = "student-option-name";
+    nameEl.textContent = student.name;
+
+    const statusEl = document.createElement("span");
+    statusEl.className = `student-status-badge ${studentStatusClass(student.status)}`;
+    statusEl.textContent = studentStatusText(student.status);
+
+    row.appendChild(nameEl);
+    row.appendChild(statusEl);
     row.addEventListener("mousedown", async (e) => {
       e.preventDefault();
-      const combo = document.getElementById("student-combo");
-      if (combo) combo.value = student.name;
-      state.selectedStudentId = student.id;
-      hideStudentDropdown();
-      await loadTimetable();
+      await selectStudentFromDropdown(student);
     });
     dropdown.appendChild(row);
   }
   if (list.length === 0) {
     const empty = document.createElement("div");
-    empty.className = "student-option";
+    empty.className = "student-option student-option-empty";
     empty.textContent = "該当なし";
     dropdown.appendChild(empty);
+  }
+
+  if (activateSelected && list.length > 0) {
+    const selectedIndex = list.findIndex((s) => s.id === state.selectedStudentId);
+    setActiveStudentOption(selectedIndex >= 0 ? selectedIndex : 0);
   }
 }
 
@@ -128,6 +244,7 @@ function hideStudentDropdown() {
   const dropdown = document.getElementById("student-dropdown");
   if (!dropdown) return;
   dropdown.classList.add("hidden");
+  activeStudentOptionIndex = -1;
 }
 
 function isStudentDropdownVisible() {
@@ -142,6 +259,451 @@ function updateStudentPlaceholder() {
   combo.placeholder = selected
     ? `現在: ${selected.name}（入力して検索）`
     : "生徒名を入力して選択";
+}
+
+function studentStatusText(status) {
+  return status === STUDENT_STATUS_COMPLETE ? STUDENT_STATUS_COMPLETE : STUDENT_STATUS_ADJUSTING;
+}
+
+function studentStatusClass(status) {
+  return status === STUDENT_STATUS_COMPLETE
+    ? "student-status-complete"
+    : "student-status-adjusting";
+}
+
+function getSelectedStudent() {
+  return state.students.find((s) => s.id === state.selectedStudentId) || null;
+}
+
+function toAssignmentSnapshot(assignment, studentId = state.selectedStudentId) {
+  if (!assignment) return null;
+  return {
+    id: assignment.id ?? null,
+    student_id: Number(studentId),
+    teacher_id:
+      assignment.teacher_id === null || assignment.teacher_id === undefined
+        ? null
+        : Number(assignment.teacher_id),
+    table_id: String(assignment.table_id),
+    subject: String(assignment.subject),
+    date: String(assignment.date),
+    period: Number(assignment.period),
+  };
+}
+
+function pushAssignmentHistory(action) {
+  if (isApplyingAssignmentHistory) return;
+  assignmentUndoStack.push(action);
+  assignmentRedoStack.length = 0;
+}
+
+function isEditableElement(target) {
+  if (!(target instanceof HTMLElement)) return false;
+  if (target.isContentEditable) return true;
+  const tag = target.tagName;
+  if (tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT") return true;
+  return false;
+}
+
+async function ensureStudentContext(studentId) {
+  if (state.selectedStudentId === studentId) return;
+  state.selectedStudentId = studentId;
+  const student = state.students.find((s) => s.id === studentId);
+  const combo = document.getElementById("student-combo");
+  if (combo) combo.value = student ? student.name : "";
+  updateStudentPlaceholder();
+  await loadTimetable();
+}
+
+async function createAssignmentFromSnapshot(snapshot) {
+  const payload = {
+    student_id: snapshot.student_id,
+    teacher_id: snapshot.teacher_id,
+    table_id: snapshot.table_id,
+    subject: snapshot.subject,
+    date: snapshot.date,
+    period: snapshot.period,
+  };
+  const created = await api("/api/assignments", {
+    method: "POST",
+    body: JSON.stringify(payload),
+  });
+  snapshot.id = created.id;
+  return created;
+}
+
+async function deleteAssignmentBySnapshot(snapshot) {
+  if (!snapshot) return;
+  let targetId = snapshot.id;
+  if (!targetId) {
+    const slot = (state.timetable.assignments || []).find(
+      (a) => a.date === snapshot.date && Number(a.period) === Number(snapshot.period)
+    );
+    targetId = slot ? slot.id : null;
+  }
+  if (!targetId) return;
+  await api(`/api/assignments/${targetId}`, { method: "DELETE" });
+}
+
+async function applyAssignmentHistoryAction(action, mode) {
+  const target = mode === "undo" ? action.before : action.after;
+  const opposite = mode === "undo" ? action.after : action.before;
+  const context = target || opposite;
+  if (!context) return;
+
+  await ensureStudentContext(context.student_id);
+  if (!state.timetable) {
+    await loadTimetable();
+  }
+
+  if (target) {
+    await createAssignmentFromSnapshot(target);
+  } else {
+    await deleteAssignmentBySnapshot(opposite);
+  }
+
+  await loadTimetable();
+}
+
+async function undoAssignmentChange() {
+  if (!assignmentUndoStack.length) {
+    showFlash("取り消せるコマ操作がありません");
+    return;
+  }
+  const action = assignmentUndoStack.pop();
+  isApplyingAssignmentHistory = true;
+  try {
+    await applyAssignmentHistoryAction(action, "undo");
+    assignmentRedoStack.push(action);
+    showFlash("コマ操作を取り消しました");
+  } catch (err) {
+    assignmentUndoStack.push(action);
+    showFlash(`取り消し失敗: ${err.message}`, "error");
+  } finally {
+    isApplyingAssignmentHistory = false;
+  }
+}
+
+async function redoAssignmentChange() {
+  if (!assignmentRedoStack.length) {
+    showFlash("やり直せるコマ操作がありません");
+    return;
+  }
+  const action = assignmentRedoStack.pop();
+  isApplyingAssignmentHistory = true;
+  try {
+    await applyAssignmentHistoryAction(action, "redo");
+    assignmentUndoStack.push(action);
+    showFlash("コマ操作をやり直しました");
+  } catch (err) {
+    assignmentRedoStack.push(action);
+    showFlash(`やり直し失敗: ${err.message}`, "error");
+  } finally {
+    isApplyingAssignmentHistory = false;
+  }
+}
+
+function syncStudentInState(updatedStudent) {
+  const idx = state.students.findIndex((s) => s.id === updatedStudent.id);
+  if (idx < 0) return;
+  state.students[idx] = { ...state.students[idx], ...updatedStudent };
+}
+
+function renderStudentTrashToggle() {
+  const btn = document.getElementById("student-note-trash-toggle-btn");
+  if (!btn) return;
+  const deletedCount = (state.studentNotes || []).filter((n) => Number(n.is_deleted)).length;
+  if (isStudentTrashOpen) {
+    btn.textContent = `ゴミ箱を隠す (${deletedCount})`;
+  } else {
+    btn.textContent = `ゴミ箱を表示 (${deletedCount})`;
+  }
+}
+
+function renderStudentNotesFeed() {
+  const feed = document.getElementById("student-note-feed");
+  if (!feed) return;
+  feed.innerHTML = "";
+  renderStudentTrashToggle();
+
+  if (!state.selectedStudentId) {
+    const empty = document.createElement("div");
+    empty.className = "student-note-empty";
+    empty.textContent = "生徒を選択してください。";
+    feed.appendChild(empty);
+    return;
+  }
+
+  if (!state.studentNotes.length) {
+    const empty = document.createElement("div");
+    empty.className = "student-note-empty";
+    empty.textContent = "メモはまだありません。";
+    feed.appendChild(empty);
+    return;
+  }
+
+  const activeNotes = state.studentNotes.filter((n) => !Number(n.is_deleted));
+  const deletedNotes = state.studentNotes.filter((n) => Number(n.is_deleted));
+  renderStudentTrashToggle();
+
+  const appendSectionTitle = (label) => {
+    const title = document.createElement("div");
+    title.className = "student-note-section-title";
+    title.textContent = label;
+    feed.appendChild(title);
+  };
+
+  if (activeNotes.length > 0) {
+    appendSectionTitle("メモ");
+  }
+  for (const note of activeNotes) {
+    const item = document.createElement("div");
+    item.className = "student-note-item";
+
+    const meta = document.createElement("div");
+    meta.className = "student-note-meta";
+    const time = document.createElement("span");
+    time.className = "student-note-time";
+    time.textContent = note.created_at || "";
+    meta.appendChild(time);
+
+    const right = document.createElement("div");
+    right.className = "student-note-actions";
+    const edited = document.createElement("span");
+    edited.className = "student-note-edited";
+    edited.textContent = Number(note.is_edited) ? "編集済み" : "";
+    right.appendChild(edited);
+
+    if (editingStudentNoteId !== note.id) {
+      const editBtn = document.createElement("button");
+      editBtn.type = "button";
+      editBtn.className = "student-note-action-btn";
+      editBtn.textContent = "編集";
+      editBtn.addEventListener("click", () => {
+        editingStudentNoteId = note.id;
+        renderStudentMetaPanel();
+      });
+      right.appendChild(editBtn);
+
+      const delBtn = document.createElement("button");
+      delBtn.type = "button";
+      delBtn.className = "student-note-action-btn danger";
+      delBtn.textContent = "削除";
+      delBtn.addEventListener("click", async () => {
+        try {
+          await deleteStudentNote(note.id);
+          showFlash("メモをゴミ箱に移動しました");
+        } catch (err) {
+          showFlash(`メモ削除失敗: ${err.message}`, "error");
+        }
+      });
+      right.appendChild(delBtn);
+    }
+    meta.appendChild(right);
+    item.appendChild(meta);
+
+    if (editingStudentNoteId === note.id) {
+      const editArea = document.createElement("textarea");
+      editArea.className = "student-note-edit-area";
+      editArea.maxLength = 500;
+      editArea.value = note.body || "";
+      item.appendChild(editArea);
+
+      const editActions = document.createElement("div");
+      editActions.className = "student-note-edit-actions";
+      const cancelBtn = document.createElement("button");
+      cancelBtn.type = "button";
+      cancelBtn.textContent = "キャンセル";
+      cancelBtn.addEventListener("click", () => {
+        editingStudentNoteId = null;
+        renderStudentMetaPanel();
+      });
+      const saveBtn = document.createElement("button");
+      saveBtn.type = "button";
+      saveBtn.textContent = "保存";
+      saveBtn.addEventListener("click", async () => {
+        const nextBody = editArea.value;
+        editingStudentNoteId = null;
+        try {
+          await editStudentNote(note.id, nextBody);
+          showFlash("メモを更新しました");
+        } catch (err) {
+          editingStudentNoteId = note.id;
+          renderStudentMetaPanel();
+          showFlash(`メモ更新失敗: ${err.message}`, "error");
+        }
+      });
+      editActions.appendChild(cancelBtn);
+      editActions.appendChild(saveBtn);
+      item.appendChild(editActions);
+    } else {
+      const body = document.createElement("div");
+      body.className = "student-note-body";
+      body.textContent = note.body || "";
+      item.appendChild(body);
+    }
+
+    feed.appendChild(item);
+  }
+
+  if (isStudentTrashOpen) {
+    appendSectionTitle(`ゴミ箱 (${deletedNotes.length})`);
+    if (!deletedNotes.length) {
+      const emptyTrash = document.createElement("div");
+      emptyTrash.className = "student-note-empty";
+      emptyTrash.textContent = "削除済みメモはありません。";
+      feed.appendChild(emptyTrash);
+    }
+    for (const note of deletedNotes) {
+      const item = document.createElement("div");
+      item.className = "student-note-item student-note-item-deleted";
+
+      const meta = document.createElement("div");
+      meta.className = "student-note-meta";
+      const time = document.createElement("span");
+      time.className = "student-note-time";
+      const deletedAt = note.deleted_at || note.updated_at || "";
+      time.textContent = `削除: ${deletedAt}`;
+      meta.appendChild(time);
+
+      const right = document.createElement("div");
+      right.className = "student-note-actions";
+      const restoreBtn = document.createElement("button");
+      restoreBtn.type = "button";
+      restoreBtn.className = "student-note-action-btn";
+      restoreBtn.textContent = "復元";
+      restoreBtn.addEventListener("click", async () => {
+        try {
+          await restoreStudentNote(note.id);
+          showFlash("メモを復元しました");
+        } catch (err) {
+          showFlash(`メモ復元失敗: ${err.message}`, "error");
+        }
+      });
+      right.appendChild(restoreBtn);
+
+      const hardDeleteBtn = document.createElement("button");
+      hardDeleteBtn.type = "button";
+      hardDeleteBtn.className = "student-note-action-btn danger";
+      hardDeleteBtn.textContent = "完全削除";
+      hardDeleteBtn.addEventListener("click", async () => {
+        try {
+          await hardDeleteStudentNote(note.id);
+          showFlash("メモを完全削除しました");
+        } catch (err) {
+          showFlash(`完全削除失敗: ${err.message}`, "error");
+        }
+      });
+      right.appendChild(hardDeleteBtn);
+      meta.appendChild(right);
+      item.appendChild(meta);
+
+      const body = document.createElement("div");
+      body.className = "student-note-body";
+      body.textContent = note.body || "";
+      item.appendChild(body);
+      feed.appendChild(item);
+    }
+  }
+
+  feed.scrollTop = feed.scrollHeight;
+}
+
+function renderStudentMetaPanel() {
+  const statusSelect = document.getElementById("student-status-select");
+  const composeInput = document.getElementById("student-note-compose-input");
+  const sendBtn = document.getElementById("student-note-send-btn");
+  const trashToggleBtn = document.getElementById("student-note-trash-toggle-btn");
+  if (!statusSelect || !composeInput || !sendBtn || !trashToggleBtn) return;
+
+  const selected = getSelectedStudent();
+  if (!selected) {
+    statusSelect.value = STUDENT_STATUS_ADJUSTING;
+    statusSelect.disabled = true;
+    composeInput.disabled = true;
+    sendBtn.disabled = true;
+    trashToggleBtn.disabled = true;
+    renderStudentNotesFeed();
+    return;
+  }
+
+  statusSelect.disabled = false;
+  composeInput.disabled = false;
+  sendBtn.disabled = false;
+  trashToggleBtn.disabled = false;
+  statusSelect.value = studentStatusText(selected.status);
+  renderStudentNotesFeed();
+}
+
+async function loadStudentNotes() {
+  if (!state.selectedStudentId) {
+    state.studentNotes = [];
+    editingStudentNoteId = null;
+    return;
+  }
+  state.studentNotes = await api(`/api/students/${state.selectedStudentId}/notes`);
+}
+
+async function saveSelectedStudentStatus(status) {
+  if (!state.selectedStudentId) return;
+  const updated = await api(`/api/students/${state.selectedStudentId}/meta`, {
+    method: "PATCH",
+    body: JSON.stringify({ status }),
+  });
+  syncStudentInState(updated);
+  if (state.timetable?.student?.id === updated.id) {
+    state.timetable.student = { ...state.timetable.student, ...updated };
+  }
+  const studentCombo = document.getElementById("student-combo");
+  renderStudentOptions(studentCombo ? studentCombo.value : "");
+  renderContextBar();
+}
+
+async function postStudentNote(body) {
+  if (!state.selectedStudentId) return;
+  await api(`/api/students/${state.selectedStudentId}/notes`, {
+    method: "POST",
+    body: JSON.stringify({ body }),
+  });
+  await loadStudentNotes();
+  renderStudentMetaPanel();
+}
+
+async function editStudentNote(noteId, body) {
+  if (!state.selectedStudentId) return;
+  await api(`/api/students/${state.selectedStudentId}/notes/${noteId}`, {
+    method: "PATCH",
+    body: JSON.stringify({ body }),
+  });
+  await loadStudentNotes();
+  renderStudentMetaPanel();
+}
+
+async function deleteStudentNote(noteId) {
+  if (!state.selectedStudentId) return;
+  await api(`/api/students/${state.selectedStudentId}/notes/${noteId}`, {
+    method: "DELETE",
+  });
+  await loadStudentNotes();
+  renderStudentMetaPanel();
+}
+
+async function restoreStudentNote(noteId) {
+  if (!state.selectedStudentId) return;
+  await api(`/api/students/${state.selectedStudentId}/notes/${noteId}/restore`, {
+    method: "POST",
+  });
+  await loadStudentNotes();
+  renderStudentMetaPanel();
+}
+
+async function hardDeleteStudentNote(noteId) {
+  if (!state.selectedStudentId) return;
+  await api(`/api/students/${state.selectedStudentId}/notes/${noteId}/hard-delete`, {
+    method: "DELETE",
+  });
+  await loadStudentNotes();
+  renderStudentMetaPanel();
 }
 
 function showFlash(message, type = "info") {
@@ -196,6 +758,8 @@ async function loadTimetable() {
       subject_counts: {},
       enrolled_subjects: [],
     };
+    state.studentNotes = [];
+    editingStudentNoteId = null;
     state.conflicts = [];
     state.slotSummary = [];
     state.teacherPanel = { teachers: [], selected_teacher_id: null, assignments: [], availability: [] };
@@ -203,6 +767,8 @@ async function loadTimetable() {
     return;
   }
   state.timetable = await api(`/api/students/${state.selectedStudentId}/timetable`);
+  await loadStudentNotes();
+  editingStudentNoteId = null;
   buildSubjectSelect(state.timetable.enrolled_subjects || []);
   if (
     !state.selectedSubject ||
@@ -254,20 +820,11 @@ async function loadTeacherPanel() {
 
 function render() {
   renderContextBar();
+  renderStudentMetaPanel();
   renderCounts();
   renderConflictBar();
   renderGrid();
   renderTeacherPanel();
-}
-
-function colorForStudent(studentId) {
-  const base = Number(studentId || 0);
-  const hue = (base * 47 + 160) % 360;
-  return {
-    bg: `hsl(${hue} 58% 92%)`,
-    border: `hsl(${hue} 42% 76%)`,
-    text: `hsl(${hue} 55% 20%)`,
-  };
 }
 
 function renderContextBar() {
@@ -276,12 +833,16 @@ function renderContextBar() {
   const subjectEl = document.getElementById("context-subject");
   if (!bar || !studentEl || !subjectEl) return;
 
+  const selected = getSelectedStudent();
   const studentName = state.timetable?.student?.name || "生徒未選択";
+  const status = selected ? studentStatusText(selected.status) : "";
   const subjectName = state.selectedSubject || "科目未選択";
-  studentEl.textContent = studentName;
+  studentEl.textContent = selected ? `${studentName}（${status}）` : studentName;
   subjectEl.textContent = subjectName;
 
-  const c = colorForStudent(state.selectedStudentId);
+  const c = colorForStudentRef(
+    state.selectedStudentId || state.timetable?.student?.name || "default"
+  );
   bar.style.background = c.bg;
   bar.style.borderColor = c.border;
   bar.style.color = c.text;
@@ -456,7 +1017,10 @@ function renderGrid() {
         if (assignment.has_table_conflict) reasons.push("席重複");
         if (assignment.has_schedule_mismatch) reasons.push("講師予定不一致");
         if (assignment.has_student_schedule_mismatch) reasons.push("生徒予定不一致");
-        td.innerHTML = `<div class=\"cell-main\">${subjectAbbrev(assignment.subject)} ${assignment.teacher_name} [${assignment.table_id}]</div>${
+        const tone = subjectTone(assignment.subject);
+        td.innerHTML = `<div class="cell-main"><span class="assignment-pill subject-${tone}"><span class="subject-chip">${subjectAbbrev(
+          assignment.subject
+        )}</span> ${assignment.teacher_name} ${assignment.table_id}</span></div>${
           reasons.length ? `<div class=\"cell-reason\">${reasons.join(" / ")}</div>` : ""
         }`;
         td.addEventListener("click", () => openTeacherModal(date, period, assignment));
@@ -470,8 +1034,13 @@ function renderGrid() {
           td.innerHTML = `<div class="cell-hint">${summary.free}人対応可</div>`;
           td.addEventListener("click", () => openTeacherModal(date, period, null));
         } else {
-          td.classList.add("no-teacher", "no-teacher-clickable");
-          td.innerHTML = `<div class="cell-hint mute">対応講師なし</div>`;
+          if (summary.total > 0) {
+            td.classList.add("slot-full", "no-teacher-clickable");
+            td.innerHTML = `<div class="cell-hint">満</div>`;
+          } else {
+            td.classList.add("no-candidate", "no-teacher-clickable");
+            td.innerHTML = `<div class="cell-hint mute">0</div>`;
+          }
           td.addEventListener("click", () => openTeacherModal(date, period, null));
         }
       } else {
@@ -579,7 +1148,10 @@ function renderTeacherGrid() {
   for (const a of panel.assignments || []) {
     const key = `${a.date}#${a.period}`;
     if (!assignmentMap.has(key)) assignmentMap.set(key, []);
-    assignmentMap.get(key).push(a.student_name);
+    assignmentMap.get(key).push({
+      student_name: a.student_name,
+      subject: a.subject,
+    });
     if (a.has_conflict) conflictSlotSet.add(key);
   }
 
@@ -605,24 +1177,32 @@ function renderTeacherGrid() {
       const td = document.createElement("td");
       td.className = "teacher-cell";
       const key = `${date}#${period}`;
-      const names = assignmentMap.get(key) || [];
+      const entries = assignmentMap.get(key) || [];
       const available = availabilitySet.has(key);
-      if (names.length > 0) {
+      if (entries.length > 0) {
         td.classList.add("assigned");
         if (conflictSlotSet.has(key)) {
           td.classList.add("conflict");
         }
         td.innerHTML = "";
-        names.forEach((name, idx) => {
+        entries.forEach((entry, idx) => {
+          const student = (state.students || []).find((s) => s.name === entry.student_name);
+          const c = colorForStudentRef(student ? student.id : entry.student_name);
           const btn = document.createElement("button");
           btn.type = "button";
           btn.className = "teacher-cell-student";
-          btn.textContent = name;
+          btn.textContent = entry.student_name;
+          btn.style.backgroundColor = c.bg;
+          btn.style.borderLeftColor = c.border;
+          btn.style.color = c.text;
+          if (entry.subject) {
+            btn.title = `科目: ${entry.subject}`;
+          }
           btn.addEventListener("click", async () => {
-            await jumpToStudentFromTeacherPanel(name);
+            await jumpToStudentFromTeacherPanel(entry.student_name);
           });
           td.appendChild(btn);
-          if (idx < names.length - 1) {
+          if (idx < entries.length - 1) {
             const sep = document.createElement("span");
             sep.className = "teacher-cell-sep";
             sep.textContent = " / ";
@@ -677,7 +1257,9 @@ async function openTeacherModal(date, period, existingAssignment) {
   const removeBtn = document.getElementById("remove-assignment-btn");
   const tableSelect = document.getElementById("table-select");
 
-  title.textContent = `${formatDate(date)} ${period}限 - ${state.selectedSubject}`;
+  const selectedStudent = getSelectedStudent();
+  const studentName = selectedStudent ? selectedStudent.name : "生徒未選択";
+  title.textContent = `${formatDate(date)} ${period}限 - ${state.selectedSubject} - ${studentName}`;
   list.innerHTML = "";
   tableSelect.innerHTML = "";
 
@@ -727,7 +1309,8 @@ async function openTeacherModal(date, period, existingAssignment) {
     btn.addEventListener("click", async () => {
       closeModal();
       const selectedTableId = tableSelect.value;
-      await api("/api/assignments", {
+      const before = toAssignmentSnapshot(existingAssignment);
+      const created = await api("/api/assignments", {
         method: "POST",
         body: JSON.stringify({
           student_id: state.selectedStudentId,
@@ -738,6 +1321,16 @@ async function openTeacherModal(date, period, existingAssignment) {
           period,
         }),
       });
+      const after = {
+        id: created.id,
+        student_id: state.selectedStudentId,
+        teacher_id: teacher.teacher_id,
+        table_id: selectedTableId,
+        subject: state.selectedSubject,
+        date,
+        period,
+      };
+      pushAssignmentHistory({ before, after });
       await loadTimetable();
     });
     list.appendChild(btn);
@@ -748,7 +1341,9 @@ async function openTeacherModal(date, period, existingAssignment) {
     removeBtn.onclick = async () => {
       const ok = await showConfirmModal("この割り当てを解除しますか？");
       if (!ok) return;
+      const before = toAssignmentSnapshot(existingAssignment);
       await api(`/api/assignments/${existingAssignment.id}`, { method: "DELETE" });
+      pushAssignmentHistory({ before, after: null });
       closeModal();
       await loadTimetable();
     };
@@ -844,12 +1439,23 @@ async function syncScheduleFromFile() {
 
     const label = result.kind === "teacher" ? "講師予定" : "生徒予定";
     showFlash(`${label}反映完了: 取込${result.imported_count}件 / 削除${result.removed_count}件`);
-    state.students = await api("/api/students");
-    await loadBaseData();
+    await loadBaseData({ preserveSelection: true });
     await loadTimetable();
     input.value = "";
   } catch (err) {
     showFlash(`取り込み失敗: ${err.message}`, "error");
+  }
+}
+
+async function resetCurrentAssignments() {
+  const ok = await showConfirmModal("現在の登録（割り当て）をすべて削除します。よろしいですか？");
+  if (!ok) return;
+  try {
+    const result = await api("/api/assignments/reset", { method: "POST" });
+    await loadTimetable();
+    showFlash(`登録をリセットしました（${result.deleted_assignments}件削除）`);
+  } catch (err) {
+    showFlash(`リセット失敗: ${err.message}`, "error");
   }
 }
 
@@ -865,6 +1471,11 @@ function bindEvents() {
   const cancelBtn = document.getElementById("cancel-modal-btn");
   const modal = document.getElementById("teacher-modal");
   const syncBtn = document.getElementById("sync-upload-btn");
+  const resetBtn = document.getElementById("reset-assignments-btn");
+  const studentStatusSelect = document.getElementById("student-status-select");
+  const studentNoteComposeInput = document.getElementById("student-note-compose-input");
+  const studentNoteSendBtn = document.getElementById("student-note-send-btn");
+  const studentNoteTrashToggleBtn = document.getElementById("student-note-trash-toggle-btn");
   const resolveStudentFromInput = async (text) => {
     const value = (text || "").trim();
     if (!value) return;
@@ -880,7 +1491,7 @@ function bindEvents() {
 
   if (studentCombo) {
     studentCombo.addEventListener("focus", () => {
-      renderStudentOptions(studentCombo.value);
+      renderStudentOptions(studentCombo.value, { activateSelected: true });
       showStudentDropdown();
     });
     studentCombo.addEventListener("input", () => {
@@ -891,7 +1502,31 @@ function bindEvents() {
       await resolveStudentFromInput(e.target.value);
     });
     studentCombo.addEventListener("keydown", async (e) => {
+      if (e.key === "ArrowDown" || e.key === "ArrowUp") {
+        e.preventDefault();
+        if (!isStudentDropdownVisible()) {
+          renderStudentOptions(studentCombo.value, { activateSelected: true });
+          showStudentDropdown();
+        }
+        const count = studentDropdownOptions.length;
+        if (!count) return;
+        const dir = e.key === "ArrowDown" ? 1 : -1;
+        let next = activeStudentOptionIndex;
+        if (next === -1) {
+          next = dir === 1 ? 0 : count - 1;
+        } else {
+          next = (next + dir + count) % count;
+        }
+        setActiveStudentOption(next);
+        return;
+      }
       if (e.key === "Enter") {
+        e.preventDefault();
+        if (isStudentDropdownVisible() && activeStudentOptionIndex >= 0) {
+          const student = studentDropdownOptions[activeStudentOptionIndex];
+          await selectStudentFromDropdown(student);
+          return;
+        }
         await resolveStudentFromInput(e.target.value);
         hideStudentDropdown();
       }
@@ -902,15 +1537,15 @@ function bindEvents() {
     });
   }
   if (studentClearBtn) {
+    studentClearBtn.addEventListener("mousedown", (e) => {
+      // Keep focus on input and avoid blur/focus race when toggling dropdown.
+      e.preventDefault();
+    });
     studentClearBtn.addEventListener("click", () => {
       if (!studentCombo) return;
       studentCombo.value = "";
-      renderStudentOptions("");
-      if (isStudentDropdownVisible()) {
-        hideStudentDropdown();
-      } else {
-        showStudentDropdown();
-      }
+      renderStudentOptions("", { activateSelected: true });
+      showStudentDropdown();
       updateStudentPlaceholder();
       studentCombo.focus();
     });
@@ -918,6 +1553,32 @@ function bindEvents() {
   if (studentDropdown) {
     studentDropdown.addEventListener("mousedown", (e) => e.preventDefault());
   }
+  document.addEventListener("mousedown", (e) => {
+    const target = e.target;
+    if (!(target instanceof Node)) return;
+    const picker = document.querySelector(".student-picker");
+    if (!picker) return;
+    if (!picker.contains(target)) {
+      hideStudentDropdown();
+    }
+  });
+  document.addEventListener("keydown", async (e) => {
+    if (isEditableElement(e.target)) return;
+    const isMod = e.ctrlKey || e.metaKey;
+    if (!isMod || e.altKey) return;
+
+    const key = e.key.toLowerCase();
+    const isUndo = key === "z" && !e.shiftKey;
+    const isRedo = key === "y" || (key === "z" && e.shiftKey);
+
+    if (!isUndo && !isRedo) return;
+    e.preventDefault();
+    if (isUndo) {
+      await undoAssignmentChange();
+    } else {
+      await redoAssignmentChange();
+    }
+  });
 
   if (subjectSelect) {
     subjectSelect.addEventListener("change", async (e) => {
@@ -1004,27 +1665,100 @@ function bindEvents() {
       await syncScheduleFromFile();
     });
   }
+  if (resetBtn) {
+    resetBtn.addEventListener("click", async () => {
+      await resetCurrentAssignments();
+    });
+  }
+  if (studentStatusSelect) {
+    studentStatusSelect.addEventListener("change", async (e) => {
+      try {
+        await saveSelectedStudentStatus(e.target.value);
+        showFlash(`ステータスを更新しました: ${e.target.value}`);
+      } catch (err) {
+        showFlash(`ステータス更新失敗: ${err.message}`, "error");
+      }
+    });
+  }
+  const sendStudentNote = async () => {
+    if (!studentNoteComposeInput) return;
+    const body = studentNoteComposeInput.value || "";
+    if (!body.trim()) return;
+    try {
+      await postStudentNote(body);
+      studentNoteComposeInput.value = "";
+      showFlash("メモを投稿しました");
+    } catch (err) {
+      showFlash(`メモ投稿失敗: ${err.message}`, "error");
+    }
+  };
+  if (studentNoteSendBtn && studentNoteComposeInput) {
+    studentNoteSendBtn.addEventListener("click", async () => {
+      await sendStudentNote();
+    });
+    studentNoteComposeInput.addEventListener("keydown", async (e) => {
+      if (e.key === "Enter" && !e.shiftKey) {
+        e.preventDefault();
+        await sendStudentNote();
+      }
+    });
+  }
+  if (studentNoteTrashToggleBtn) {
+    studentNoteTrashToggleBtn.addEventListener("click", () => {
+      isStudentTrashOpen = !isStudentTrashOpen;
+      renderStudentMetaPanel();
+    });
+  }
 }
 
 function bindAutoShutdownOnTabClose() {
-  const notifyShutdown = () => {
+  const tabId = getOrCreateTabId();
+  const heartbeat = () => {
     try {
+      fetch("/api/tab-heartbeat", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ tab_id: tabId }),
+      }).catch(() => {});
+    } catch (_) {
+      // no-op
+    }
+  };
+  const notifyClose = () => {
+    if (tabCloseNotified) return;
+    tabCloseNotified = true;
+    try {
+      const payload = JSON.stringify({ tab_id: tabId });
       if (navigator.sendBeacon) {
-        navigator.sendBeacon("/api/shutdown", "");
+        navigator.sendBeacon("/api/tab-close", new Blob([payload], { type: "application/json" }));
       } else {
-        fetch("/api/shutdown", { method: "POST", keepalive: true }).catch(() => {});
+        fetch("/api/tab-close", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: payload,
+          keepalive: true,
+        }).catch(() => {});
       }
     } catch (_) {
       // no-op
     }
   };
 
+  heartbeat();
+  if (tabHeartbeatTimer) clearInterval(tabHeartbeatTimer);
+  tabHeartbeatTimer = setInterval(heartbeat, 8000);
+
   window.addEventListener("pagehide", (e) => {
     if (e.persisted) return;
-    notifyShutdown();
+    notifyClose();
   });
   window.addEventListener("beforeunload", () => {
-    notifyShutdown();
+    notifyClose();
+  });
+  document.addEventListener("visibilitychange", () => {
+    if (document.visibilityState === "visible") {
+      heartbeat();
+    }
   });
 }
 

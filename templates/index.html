@@ -13,7 +13,16 @@
           <label for="student-combo">生徒選択:</label>
           <div class="student-picker">
             <div class="student-search-wrap">
-              <input id="student-combo" class="student-search" type="text" placeholder="生徒名を入力して選択" />
+              <input
+                id="student-combo"
+                class="student-search"
+                type="text"
+                placeholder="生徒名を入力して選択"
+                autocomplete="off"
+                autocorrect="off"
+                autocapitalize="off"
+                spellcheck="false"
+              />
               <button id="student-clear-btn" class="clear-btn" type="button" aria-label="検索文字を消す">×</button>
             </div>
             <div id="student-dropdown" class="student-dropdown hidden"></div>
@@ -25,16 +34,41 @@
         <div class="row actions">
           <input id="schedule-file-input" type="file" accept=".csv,.xlsx,.xlsm" />
           <button id="sync-upload-btn" type="button">予定表ファイルを取り込む</button>
+          <button id="reset-assignments-btn" type="button" class="danger">今の登録をリセット</button>
+        </div>
+        <div class="student-meta-wrap">
+          <section class="student-meta-panel">
+            <div class="student-meta-head">
+              <strong>事務メモ</strong>
+              <div class="student-meta-head-right">
+                <button id="student-note-trash-toggle-btn" type="button" class="student-note-trash-toggle-btn">
+                  ゴミ箱を表示
+                </button>
+                <span class="student-note-help">Enter送信 / Shift+Enter改行</span>
+              </div>
+            </div>
+            <div class="row student-meta-status-row">
+              <label for="student-status-select">ステータス:</label>
+              <select id="student-status-select">
+                <option value="調整中">調整中</option>
+                <option value="完了">完了</option>
+              </select>
+            </div>
+            <div id="student-note-feed" class="student-note-feed"></div>
+            <textarea
+              id="student-note-compose-input"
+              class="student-note-input"
+              placeholder="メモを入力"
+              maxlength="500"
+            ></textarea>
+            <div class="row student-meta-actions">
+              <button id="student-note-send-btn" type="button">送信</button>
+            </div>
+          </section>
         </div>
         <div id="subject-counts" class="counts"></div>
         <div id="flash-message" class="flash hidden"></div>
       </header>
-
-      <section id="context-bar" class="context-bar">
-        <span id="context-student" class="context-student">生徒未選択</span>
-        <span class="context-sep">/</span>
-        <span id="context-subject" class="context-subject">科目未選択</span>
-      </section>
 
       <section id="conflict-bar" class="conflict-bar hidden"></section>
 

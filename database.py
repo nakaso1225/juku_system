@@ -100,7 +100,10 @@ def init_db() -> None:
 
         CREATE TABLE IF NOT EXISTS students (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
-            name TEXT NOT NULL UNIQUE
+            name TEXT NOT NULL UNIQUE,
+            status TEXT NOT NULL DEFAULT '調整中',
+            memo TEXT NOT NULL DEFAULT '',
+            memo_updated_at TEXT
         );
 
         CREATE TABLE IF NOT EXISTS student_subjects (
@@ -132,6 +135,18 @@ def init_db() -> None:
             UNIQUE(student_id, date, period)
         );
 
+        CREATE TABLE IF NOT EXISTS student_notes (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            student_id INTEGER NOT NULL,
+            body TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            is_edited INTEGER NOT NULL DEFAULT 0,
+            is_deleted INTEGER NOT NULL DEFAULT 0,
+            deleted_at TEXT,
+            FOREIGN KEY (student_id) REFERENCES students(id) ON DELETE CASCADE
+        );
+
         CREATE INDEX IF NOT EXISTS idx_assignments_slot_teacher
             ON assignments(date, period, teacher_id);
         CREATE INDEX IF NOT EXISTS idx_assignments_student_teacher
@@ -142,6 +157,8 @@ def init_db() -> None:
             ON teacher_availability(date, period);
         CREATE INDEX IF NOT EXISTS idx_student_availability_slot
             ON student_availability(student_id, date, period);
+        CREATE INDEX IF NOT EXISTS idx_student_notes_student
+            ON student_notes(student_id, id);
         """
     )
 
@@ -154,14 +171,54 @@ def init_db() -> None:
             """
             CREATE TABLE IF NOT EXISTS students_new (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
-                name TEXT NOT NULL UNIQUE
+                name TEXT NOT NULL UNIQUE,
+                status TEXT NOT NULL DEFAULT '調整中',
+                memo TEXT NOT NULL DEFAULT '',
+                memo_updated_at TEXT
             )
             """
         )
-        cur.execute("INSERT OR IGNORE INTO students_new(id, name) SELECT id, name FROM students")
+        cur.execute(
+            """
+            INSERT OR IGNORE INTO students_new(id, name, status, memo, memo_updated_at)
+            SELECT id, name, '調整中', '', NULL FROM students
+            """
+        )
         cur.execute("DROP TABLE students")
         cur.execute("ALTER TABLE students_new RENAME TO students")
         cur.execute("PRAGMA foreign_keys = ON")
+    student_cols = {
+        row["name"] for row in cur.execute("PRAGMA table_info(students)").fetchall()
+    }
+    if "status" not in student_cols:
+        cur.execute("ALTER TABLE students ADD COLUMN status TEXT NOT NULL DEFAULT '調整中'")
+    if "memo" not in student_cols:
+        cur.execute("ALTER TABLE students ADD COLUMN memo TEXT NOT NULL DEFAULT ''")
+    if "memo_updated_at" not in student_cols:
+        cur.execute("ALTER TABLE students ADD COLUMN memo_updated_at TEXT")
+    cur.execute(
+        """
+        INSERT INTO student_notes(student_id, body, created_at, updated_at, is_edited)
+        SELECT
+            s.id,
+            s.memo,
+            COALESCE(NULLIF(s.memo_updated_at, ''), strftime('%Y-%m-%d %H:%M', 'now', 'localtime')),
+            COALESCE(NULLIF(s.memo_updated_at, ''), strftime('%Y-%m-%d %H:%M', 'now', 'localtime')),
+            0
+        FROM students s
+        WHERE TRIM(COALESCE(s.memo, '')) != ''
+          AND NOT EXISTS (
+              SELECT 1 FROM student_notes n WHERE n.student_id = s.id
+          )
+        """
+    )
+    note_cols = {
+        row["name"] for row in cur.execute("PRAGMA table_info(student_notes)").fetchall()
+    }
+    if "is_deleted" not in note_cols:
+        cur.execute("ALTER TABLE student_notes ADD COLUMN is_deleted INTEGER NOT NULL DEFAULT 0")
+    if "deleted_at" not in note_cols:
+        cur.execute("ALTER TABLE student_notes ADD COLUMN deleted_at TEXT")
 
     assignment_cols = {
         row["name"] for row in cur.execute("PRAGMA table_info(assignments)").fetchall()

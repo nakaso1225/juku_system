@@ -4,11 +4,14 @@ import csv
 import re
 from collections import OrderedDict
 from dataclasses import dataclass
+from datetime import datetime
 from io import BytesIO, StringIO
 from pathlib import Path
 from typing import Any
 
 from database import DATES, PERIODS, get_connection
+
+STUDENT_STATUSES = {"調整中", "完了"}
 
 
 @dataclass
@@ -46,7 +49,13 @@ class UnifiedSyncPreview:
 
 def list_students() -> list[dict[str, Any]]:
     conn = get_connection()
-    rows = conn.execute("SELECT id, name FROM students ORDER BY name").fetchall()
+    rows = conn.execute(
+        """
+        SELECT id, name, status, memo, memo_updated_at
+        FROM students
+        ORDER BY name
+        """
+    ).fetchall()
     conn.close()
     return [dict(row) for row in rows]
 
@@ -172,7 +181,7 @@ def get_teacher_panel(student_id: int, teacher_id: int | None = None) -> dict[st
 def get_student_timetable(student_id: int) -> dict[str, Any] | None:
     conn = get_connection()
     student = conn.execute(
-        "SELECT id, name FROM students WHERE id = ?",
+        "SELECT id, name, status, memo, memo_updated_at FROM students WHERE id = ?",
         (student_id,),
     ).fetchone()
     if not student:
@@ -496,6 +505,241 @@ def delete_assignment(assignment_id: int) -> bool:
     return deleted
 
 
+def update_student_status_and_memo(
+    student_id: int,
+    *,
+    status: str | None = None,
+    memo: str | None = None,
+) -> dict[str, Any]:
+    if status is None and memo is None:
+        raise ValueError("status or memo is required")
+
+    if status is not None:
+        status = status.strip()
+        if status not in STUDENT_STATUSES:
+            raise ValueError("invalid status")
+
+    if memo is not None:
+        memo = memo.strip()
+        if len(memo) > 500:
+            raise ValueError("memo must be 500 characters or fewer")
+
+    conn = get_connection()
+    row = conn.execute("SELECT id FROM students WHERE id = ?", (student_id,)).fetchone()
+    if not row:
+        conn.close()
+        raise ValueError("student not found")
+
+    updates: list[str] = []
+    params: list[Any] = []
+    if status is not None:
+        updates.append("status = ?")
+        params.append(status)
+    if memo is not None:
+        updates.append("memo = ?")
+        params.append(memo)
+        updates.append("memo_updated_at = ?")
+        params.append(datetime.now().strftime("%Y-%m-%d %H:%M"))
+
+    params.append(student_id)
+    conn.execute(f"UPDATE students SET {', '.join(updates)} WHERE id = ?", params)
+    conn.commit()
+    updated = conn.execute(
+        """
+        SELECT id, name, status, memo, memo_updated_at
+        FROM students
+        WHERE id = ?
+        """,
+        (student_id,),
+    ).fetchone()
+    conn.close()
+    return dict(updated)
+
+
+def list_student_notes(student_id: int) -> list[dict[str, Any]]:
+    conn = get_connection()
+    exists = conn.execute("SELECT 1 FROM students WHERE id = ?", (student_id,)).fetchone()
+    if not exists:
+        conn.close()
+        raise ValueError("student not found")
+    rows = conn.execute(
+        """
+        SELECT id, student_id, body, created_at, updated_at, is_edited, is_deleted, deleted_at
+        FROM student_notes
+        WHERE student_id = ?
+        ORDER BY id ASC
+        """,
+        (student_id,),
+    ).fetchall()
+    conn.close()
+    return [dict(row) for row in rows]
+
+
+def create_student_note(student_id: int, body: str) -> dict[str, Any]:
+    body = body.strip()
+    if not body:
+        raise ValueError("body is required")
+    if len(body) > 500:
+        raise ValueError("body must be 500 characters or fewer")
+
+    now = datetime.now().strftime("%Y-%m-%d %H:%M")
+    conn = get_connection()
+    exists = conn.execute("SELECT 1 FROM students WHERE id = ?", (student_id,)).fetchone()
+    if not exists:
+        conn.close()
+        raise ValueError("student not found")
+
+    cur = conn.cursor()
+    cur.execute(
+        """
+        INSERT INTO student_notes(
+            student_id, body, created_at, updated_at, is_edited, is_deleted, deleted_at
+        )
+        VALUES (?, ?, ?, ?, 0, 0, NULL)
+        """,
+        (student_id, body, now, now),
+    )
+    note_id = cur.lastrowid
+    note = conn.execute(
+        """
+        SELECT id, student_id, body, created_at, updated_at, is_edited, is_deleted, deleted_at
+        FROM student_notes
+        WHERE id = ? AND student_id = ?
+        """,
+        (note_id, student_id),
+    ).fetchone()
+    conn.commit()
+    conn.close()
+    return dict(note)
+
+
+def update_student_note(student_id: int, note_id: int, body: str) -> dict[str, Any]:
+    body = body.strip()
+    if not body:
+        raise ValueError("body is required")
+    if len(body) > 500:
+        raise ValueError("body must be 500 characters or fewer")
+
+    now = datetime.now().strftime("%Y-%m-%d %H:%M")
+    conn = get_connection()
+    exists = conn.execute("SELECT 1 FROM students WHERE id = ?", (student_id,)).fetchone()
+    if not exists:
+        conn.close()
+        raise ValueError("student not found")
+
+    existing_note = conn.execute(
+        """
+        SELECT id, student_id, body, created_at, updated_at, is_edited, is_deleted, deleted_at
+        FROM student_notes
+        WHERE id = ? AND student_id = ? AND is_deleted = 0
+        """,
+        (note_id, student_id),
+    ).fetchone()
+    if not existing_note:
+        conn.close()
+        raise ValueError("note not found")
+
+    if str(existing_note["body"] or "") == body:
+        conn.close()
+        return dict(existing_note)
+
+    cur = conn.cursor()
+    cur.execute(
+        """
+        UPDATE student_notes
+        SET body = ?, updated_at = ?, is_edited = 1
+        WHERE id = ? AND student_id = ?
+          AND is_deleted = 0
+        """,
+        (body, now, note_id, student_id),
+    )
+
+    note = conn.execute(
+        """
+        SELECT id, student_id, body, created_at, updated_at, is_edited, is_deleted, deleted_at
+        FROM student_notes
+        WHERE id = ? AND student_id = ?
+        """,
+        (note_id, student_id),
+    ).fetchone()
+    conn.commit()
+    conn.close()
+    return dict(note)
+
+
+def delete_student_note(student_id: int, note_id: int) -> bool:
+    conn = get_connection()
+    exists = conn.execute("SELECT 1 FROM students WHERE id = ?", (student_id,)).fetchone()
+    if not exists:
+        conn.close()
+        raise ValueError("student not found")
+
+    cur = conn.cursor()
+    now = datetime.now().strftime("%Y-%m-%d %H:%M")
+    cur.execute(
+        """
+        UPDATE student_notes
+        SET is_deleted = 1, deleted_at = ?
+        WHERE id = ? AND student_id = ? AND is_deleted = 0
+        """,
+        (now, note_id, student_id),
+    )
+    deleted = cur.rowcount > 0
+    conn.commit()
+    conn.close()
+    return deleted
+
+
+def restore_student_note(student_id: int, note_id: int) -> bool:
+    conn = get_connection()
+    exists = conn.execute("SELECT 1 FROM students WHERE id = ?", (student_id,)).fetchone()
+    if not exists:
+        conn.close()
+        raise ValueError("student not found")
+
+    cur = conn.cursor()
+    cur.execute(
+        """
+        UPDATE student_notes
+        SET is_deleted = 0, deleted_at = NULL
+        WHERE id = ? AND student_id = ? AND is_deleted = 1
+        """,
+        (note_id, student_id),
+    )
+    restored = cur.rowcount > 0
+    conn.commit()
+    conn.close()
+    return restored
+
+
+def hard_delete_student_note(student_id: int, note_id: int) -> bool:
+    conn = get_connection()
+    exists = conn.execute("SELECT 1 FROM students WHERE id = ?", (student_id,)).fetchone()
+    if not exists:
+        conn.close()
+        raise ValueError("student not found")
+
+    cur = conn.cursor()
+    cur.execute(
+        "DELETE FROM student_notes WHERE id = ? AND student_id = ? AND is_deleted = 1",
+        (note_id, student_id),
+    )
+    deleted = cur.rowcount > 0
+    conn.commit()
+    conn.close()
+    return deleted
+
+
+def reset_assignments() -> int:
+    conn = get_connection()
+    cur = conn.cursor()
+    deleted_count = cur.execute("SELECT COUNT(*) FROM assignments").fetchone()[0]
+    cur.execute("DELETE FROM assignments")
+    conn.commit()
+    conn.close()
+    return int(deleted_count)
+
+
 def list_conflicts() -> list[dict[str, Any]]:
     conn = get_connection()
     teacher_rows = conn.execute(
@@ -706,7 +950,7 @@ def _upsert_teacher(conn, name: str, name_kana: str = "") -> int:
 
 
 def _parse_header_to_date(header: str) -> str | None:
-    m = re.search(r"\[(\d{1,2})/(\d{1,2})（.", header)
+    m = re.search(r"\[(\d{1,2})/(\d{1,2})(?:（[^）]*）)?\]", header)
     if not m:
         return None
     month = int(m.group(1))
@@ -740,10 +984,11 @@ def _parse_periods(cell: str) -> list[int]:
         return []
     periods = []
     for token in cell.split(","):
-        m = re.search(r"(\d)限", token)
+        m = re.search(r"([0-9０-９]+)限", token)
         if not m:
             continue
-        period = int(m.group(1))
+        digits = m.group(1).translate(str.maketrans("０１２３４５６７８９", "0123456789"))
+        period = int(digits)
         if period in PERIODS:
             periods.append(period)
     return sorted(set(periods))
@@ -841,9 +1086,7 @@ def _import_teachers_records(records: list[list[str]]) -> ImportResult:
 
 
 def _import_teachers_from_csv(path: Path) -> ImportResult:
-    with path.open("r", encoding="utf-8-sig", newline="") as f:
-        records = list(csv.reader(f))
-    return _import_teachers_records(records)
+    return _import_teachers_records(_records_from_csv_bytes(path.read_bytes()))
 
 
 def _records_from_uploaded_file(filename: str, content: bytes) -> list[list[str]]:
@@ -865,7 +1108,18 @@ def _records_from_csv_bytes(content: bytes) -> list[list[str]]:
             continue
     if decoded is None:
         raise ValueError("CSV文字コードを判定できません（utf-8 / cp932 非対応）")
-    return list(csv.reader(StringIO(decoded)))
+    lines = decoded.splitlines()
+    sample = "\n".join(lines[:10])
+    delimiter = ","
+    if sample:
+        try:
+            dialect = csv.Sniffer().sniff(sample, delimiters=",\t;")
+            delimiter = dialect.delimiter
+        except csv.Error:
+            first = lines[0] if lines else ""
+            if "\t" in first and "," not in first:
+                delimiter = "\t"
+    return list(csv.reader(StringIO(decoded), delimiter=delimiter))
 
 
 def _import_teachers_from_xlsx(path: Path) -> ImportResult:

@@ -4,7 +4,9 @@ from pathlib import Path
 import os
 import signal
 import webbrowser
+import time
 from threading import Timer
+from threading import Lock
 
 from flask import Flask, jsonify, render_template, request
 
@@ -19,7 +21,10 @@ from database import (
     seed_dummy_data,
 )
 from models import (
+    create_student_note,
     create_assignment,
+    delete_student_note,
+    hard_delete_student_note,
     delete_assignment,
     get_available_teachers,
     get_teacher_panel,
@@ -31,13 +36,54 @@ from models import (
     preview_schedule_sync_from_uploaded_file,
     preview_teachers_sync_from_uploaded_file,
     import_teachers,
+    list_student_notes,
     list_conflicts,
     list_students,
+    reset_assignments,
+    restore_student_note,
+    update_student_note,
+    update_student_status_and_memo,
 )
 
 BASE_DIR = Path(__file__).resolve().parent
 
 app = Flask(__name__)
+
+ACTIVE_TABS: dict[str, float] = {}
+ACTIVE_TABS_LOCK = Lock()
+TAB_TTL_SECONDS = 30.0
+
+
+def _prune_active_tabs(now: float) -> None:
+    stale = [tab_id for tab_id, ts in ACTIVE_TABS.items() if now - ts > TAB_TTL_SECONDS]
+    for tab_id in stale:
+        ACTIVE_TABS.pop(tab_id, None)
+
+
+def _fallback_terminate() -> None:
+    try:
+        if os.environ.get("WERKZEUG_RUN_MAIN") == "true":
+            parent_pid = os.getppid()
+            if parent_pid > 1:
+                os.kill(parent_pid, signal.SIGTERM)
+    except Exception:
+        pass
+    try:
+        os.kill(os.getpid(), signal.SIGTERM)
+    except Exception:
+        pass
+
+
+def _schedule_shutdown_if_no_tabs(delay_seconds: float = 1.5) -> None:
+    def _check_and_terminate() -> None:
+        now = time.time()
+        with ACTIVE_TABS_LOCK:
+            _prune_active_tabs(now)
+            if ACTIVE_TABS:
+                return
+        _fallback_terminate()
+
+    Timer(delay_seconds, _check_and_terminate).start()
 
 
 def bootstrap_data() -> None:
@@ -108,6 +154,109 @@ def api_student_timetable(student_id: int):
     if data is None:
         return jsonify({"error": "student not found"}), 404
     return jsonify(data)
+
+
+@app.route("/api/students/<int:student_id>/meta", methods=["PATCH"])
+def api_student_meta_update(student_id: int):
+    payload = request.get_json(silent=True) or {}
+    status_raw = payload.get("status")
+    memo_raw = payload.get("memo")
+    if status_raw is None and memo_raw is None:
+        return jsonify({"error": "status or memo is required"}), 400
+    try:
+        updated = update_student_status_and_memo(
+            student_id,
+            status=None if status_raw is None else str(status_raw),
+            memo=None if memo_raw is None else str(memo_raw),
+        )
+    except Exception as exc:
+        msg = str(exc)
+        if msg == "student not found":
+            return jsonify({"error": msg}), 404
+        return jsonify({"error": msg}), 400
+    return jsonify(updated)
+
+
+@app.route("/api/students/<int:student_id>/notes")
+def api_student_notes(student_id: int):
+    try:
+        notes = list_student_notes(student_id)
+    except Exception as exc:
+        msg = str(exc)
+        if msg == "student not found":
+            return jsonify({"error": msg}), 404
+        return jsonify({"error": msg}), 400
+    return jsonify(notes)
+
+
+@app.route("/api/students/<int:student_id>/notes", methods=["POST"])
+def api_student_notes_create(student_id: int):
+    payload = request.get_json(silent=True) or {}
+    body = str(payload.get("body") or "")
+    try:
+        note = create_student_note(student_id, body)
+    except Exception as exc:
+        msg = str(exc)
+        if msg == "student not found":
+            return jsonify({"error": msg}), 404
+        return jsonify({"error": msg}), 400
+    return jsonify(note), 201
+
+
+@app.route("/api/students/<int:student_id>/notes/<int:note_id>", methods=["PATCH"])
+def api_student_notes_update(student_id: int, note_id: int):
+    payload = request.get_json(silent=True) or {}
+    body = str(payload.get("body") or "")
+    try:
+        note = update_student_note(student_id, note_id, body)
+    except Exception as exc:
+        msg = str(exc)
+        if msg in {"student not found", "note not found"}:
+            return jsonify({"error": msg}), 404
+        return jsonify({"error": msg}), 400
+    return jsonify(note)
+
+
+@app.route("/api/students/<int:student_id>/notes/<int:note_id>", methods=["DELETE"])
+def api_student_notes_delete(student_id: int, note_id: int):
+    try:
+        deleted = delete_student_note(student_id, note_id)
+    except Exception as exc:
+        msg = str(exc)
+        if msg == "student not found":
+            return jsonify({"error": msg}), 404
+        return jsonify({"error": msg}), 400
+    if not deleted:
+        return jsonify({"error": "note not found"}), 404
+    return ("", 204)
+
+
+@app.route("/api/students/<int:student_id>/notes/<int:note_id>/restore", methods=["POST"])
+def api_student_notes_restore(student_id: int, note_id: int):
+    try:
+        restored = restore_student_note(student_id, note_id)
+    except Exception as exc:
+        msg = str(exc)
+        if msg == "student not found":
+            return jsonify({"error": msg}), 404
+        return jsonify({"error": msg}), 400
+    if not restored:
+        return jsonify({"error": "note not found"}), 404
+    return jsonify({"ok": True})
+
+
+@app.route("/api/students/<int:student_id>/notes/<int:note_id>/hard-delete", methods=["DELETE"])
+def api_student_notes_hard_delete(student_id: int, note_id: int):
+    try:
+        deleted = hard_delete_student_note(student_id, note_id)
+    except Exception as exc:
+        msg = str(exc)
+        if msg == "student not found":
+            return jsonify({"error": msg}), 404
+        return jsonify({"error": msg}), 400
+    if not deleted:
+        return jsonify({"error": "note not found"}), 404
+    return ("", 204)
 
 
 @app.route("/api/teacher-panel")
@@ -213,6 +362,12 @@ def api_delete_assignment(assignment_id: int):
     if not deleted:
         return jsonify({"error": "assignment not found"}), 404
     return ("", 204)
+
+
+@app.route("/api/assignments/reset", methods=["POST"])
+def api_reset_assignments():
+    deleted_count = reset_assignments()
+    return jsonify({"deleted_assignments": deleted_count})
 
 
 @app.route("/api/conflicts")
@@ -375,6 +530,44 @@ def api_sync_upload_apply():
     )
 
 
+@app.route("/api/tab-heartbeat", methods=["POST"])
+def api_tab_heartbeat():
+    payload = request.get_json(silent=True) or {}
+    tab_id = str(payload.get("tab_id") or "").strip()
+    if not tab_id:
+        return jsonify({"error": "tab_id is required"}), 400
+    now = time.time()
+    with ACTIVE_TABS_LOCK:
+        ACTIVE_TABS[tab_id] = now
+        _prune_active_tabs(now)
+        active_count = len(ACTIVE_TABS)
+    return jsonify({"ok": True, "active_tabs": active_count})
+
+
+@app.route("/api/tab-close", methods=["POST"])
+def api_tab_close():
+    tab_id = ""
+    payload = request.get_json(silent=True) or {}
+    if isinstance(payload, dict):
+        tab_id = str(payload.get("tab_id") or "").strip()
+    if not tab_id:
+        tab_id = str(request.form.get("tab_id") or "").strip()
+    if not tab_id:
+        tab_id = str(request.args.get("tab_id") or "").strip()
+
+    now = time.time()
+    with ACTIVE_TABS_LOCK:
+        if tab_id:
+            ACTIVE_TABS.pop(tab_id, None)
+        _prune_active_tabs(now)
+        active_count = len(ACTIVE_TABS)
+
+    if active_count == 0:
+        _schedule_shutdown_if_no_tabs()
+
+    return jsonify({"ok": True, "active_tabs": active_count})
+
+
 @app.route("/api/shutdown", methods=["POST"])
 def api_shutdown():
     remote = request.remote_addr or ""
@@ -385,22 +578,6 @@ def api_shutdown():
     if shutdown is not None:
         shutdown()
         return jsonify({"ok": True, "mode": "werkzeug"})
-
-    # Fallback: Flask/Werkzeugの起動形態によってはshutdownハンドラが無い。
-    # その場合は子プロセス/親プロセスをSIGTERMで終了する。
-    def _fallback_terminate() -> None:
-        try:
-            if os.environ.get("WERKZEUG_RUN_MAIN") == "true":
-                parent_pid = os.getppid()
-                if parent_pid > 1:
-                    os.kill(parent_pid, signal.SIGTERM)
-        except Exception:
-            pass
-        try:
-            os.kill(os.getpid(), signal.SIGTERM)
-        except Exception:
-            pass
-
     Timer(0.2, _fallback_terminate).start()
     return jsonify({"ok": True, "mode": "fallback"})
 
