@@ -18,13 +18,24 @@ let tabHeartbeatTimer = null;
 let tabCloseNotified = false;
 let editingStudentNoteId = null;
 let isStudentTrashOpen = false;
+let realtimeSocket = null;
+let realtimeReconnectTimer = null;
+let realtimeRefreshTimer = null;
+let pendingRealtimeRefresh = false;
+let pendingRealtimeBaseReload = false;
+let isRealtimeRefreshRunning = false;
 let studentDropdownOptions = [];
 let activeStudentOptionIndex = -1;
+let teacherDropdownOptions = [];
+let activeTeacherOptionIndex = -1;
+let dragState = null;
+const dragTeacherCache = new Map();
 const assignmentUndoStack = [];
 const assignmentRedoStack = [];
 let isApplyingAssignmentHistory = false;
 const TAB_ID_KEY = "juku_scheduler_tab_id";
 const STUDENT_STATUS_ADJUSTING = "調整中";
+const STUDENT_STATUS_NEEDS_ADJUSTMENT = "要調整";
 const STUDENT_STATUS_COMPLETE = "完了";
 
 const subjectAbbrevRules = [
@@ -105,9 +116,30 @@ function formatDate(isoDate) {
   return `${d.getMonth() + 1}/${d.getDate()}(${week})`;
 }
 
+function renderAccessInfo() {
+  const el = document.getElementById("access-info");
+  if (!el) return;
+  const lanUrl = state.meta && state.meta.lan_url;
+  if (!lanUrl) {
+    el.classList.add("hidden");
+    el.textContent = "";
+    return;
+  }
+  el.innerHTML = `別PCからのアクセス先: <code>${lanUrl}</code>`;
+  el.classList.remove("hidden");
+}
+
+function getRequestHeaders(extraHeaders = {}) {
+  return {
+    "X-Tab-Id": getOrCreateTabId(),
+    ...extraHeaders,
+  };
+}
+
 async function api(path, options = {}) {
+  const headers = getRequestHeaders({ "Content-Type": "application/json", ...(options.headers || {}) });
   const res = await fetch(path, {
-    headers: { "Content-Type": "application/json" },
+    headers,
     ...options,
   });
   if (!res.ok) {
@@ -128,6 +160,7 @@ async function loadBaseData(options = {}) {
 
   state.meta = await api("/api/meta");
   state.students = await api("/api/students");
+  renderAccessInfo();
 
   const studentCombo = document.getElementById("student-combo");
   const subjectSelect = document.getElementById("subject-select");
@@ -175,6 +208,115 @@ function setActiveStudentOption(index) {
   activeEl.scrollIntoView({ block: "nearest" });
 }
 
+function isTeacherModalOpen() {
+  const modal = document.getElementById("teacher-modal");
+  return !!modal && !modal.classList.contains("hidden");
+}
+
+function scheduleRealtimeRefresh(options = {}) {
+  const { reloadBase = false } = options;
+  pendingRealtimeRefresh = true;
+  pendingRealtimeBaseReload = pendingRealtimeBaseReload || reloadBase;
+  if (isTeacherModalOpen()) return;
+  if (realtimeRefreshTimer) return;
+  realtimeRefreshTimer = setTimeout(() => {
+    realtimeRefreshTimer = null;
+    flushRealtimeRefresh().catch((err) => {
+      console.error(err);
+    });
+  }, 250);
+}
+
+async function flushRealtimeRefresh() {
+  if (!pendingRealtimeRefresh || isRealtimeRefreshRunning) return;
+  if (isTeacherModalOpen()) return;
+
+  isRealtimeRefreshRunning = true;
+  const reloadBase = pendingRealtimeBaseReload;
+  pendingRealtimeRefresh = false;
+  pendingRealtimeBaseReload = false;
+
+  try {
+    if (reloadBase) {
+      await loadBaseData({ preserveSelection: true });
+      await loadTimetable({ preferEnrolledSubject: true });
+    } else {
+      await loadTimetable();
+    }
+  } catch (err) {
+    console.error(err);
+  } finally {
+    isRealtimeRefreshRunning = false;
+    if (pendingRealtimeRefresh && !isTeacherModalOpen()) {
+      scheduleRealtimeRefresh();
+    }
+  }
+}
+
+function handleRealtimeEvent(payload) {
+  if (!payload || payload.type !== "schedule_updated") return;
+  if (payload.source_tab_id && payload.source_tab_id === getOrCreateTabId()) return;
+
+  const shouldReloadBase = payload.scope === "global";
+  const currentStudentId = state.selectedStudentId;
+  const shouldRefreshCurrent =
+    shouldReloadBase ||
+    payload.student_id == null ||
+    Number(payload.student_id) === Number(currentStudentId) ||
+    state.isTeacherPanelOpen;
+
+  if (!shouldRefreshCurrent) return;
+  scheduleRealtimeRefresh({ reloadBase: shouldReloadBase });
+}
+
+function connectRealtimeUpdates() {
+  if (realtimeSocket) {
+    try {
+      realtimeSocket.close();
+    } catch (_) {
+      // no-op
+    }
+  }
+
+  const protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
+  const socketUrl = `${protocol}//${window.location.host}/ws`;
+  realtimeSocket = new WebSocket(socketUrl);
+
+  realtimeSocket.addEventListener("open", () => {
+    if (realtimeReconnectTimer) {
+      clearTimeout(realtimeReconnectTimer);
+      realtimeReconnectTimer = null;
+    }
+  });
+
+  realtimeSocket.addEventListener("message", (event) => {
+    try {
+      const payload = JSON.parse(event.data);
+      if (payload.type === "ping") return;
+      handleRealtimeEvent(payload);
+    } catch (err) {
+      console.error(err);
+    }
+  });
+
+  realtimeSocket.addEventListener("close", () => {
+    realtimeSocket = null;
+    if (realtimeReconnectTimer) return;
+    realtimeReconnectTimer = setTimeout(() => {
+      realtimeReconnectTimer = null;
+      connectRealtimeUpdates();
+    }, 1500);
+  });
+
+  realtimeSocket.addEventListener("error", () => {
+    try {
+      realtimeSocket.close();
+    } catch (_) {
+      // no-op
+    }
+  });
+}
+
 async function selectStudentFromDropdown(student) {
   if (!student) return;
   const combo = document.getElementById("student-combo");
@@ -186,7 +328,7 @@ async function selectStudentFromDropdown(student) {
   state.selectedStudentId = student.id;
   updateStudentPlaceholder();
   hideStudentDropdown();
-  await loadTimetable();
+  await loadTimetable({ preferEnrolledSubject: true });
 }
 
 function renderStudentOptions(filterText, options = {}) {
@@ -207,7 +349,8 @@ function renderStudentOptions(filterText, options = {}) {
 
     const nameEl = document.createElement("span");
     nameEl.className = "student-option-name";
-    nameEl.textContent = student.name;
+    const assignmentCount = Number(student.assignment_count || 0);
+    nameEl.textContent = `${student.name} (${assignmentCount})`;
 
     const statusEl = document.createElement("span");
     statusEl.className = `student-status-badge ${studentStatusClass(student.status)}`;
@@ -262,13 +405,15 @@ function updateStudentPlaceholder() {
 }
 
 function studentStatusText(status) {
-  return status === STUDENT_STATUS_COMPLETE ? STUDENT_STATUS_COMPLETE : STUDENT_STATUS_ADJUSTING;
+  if (status === STUDENT_STATUS_COMPLETE) return STUDENT_STATUS_COMPLETE;
+  if (status === STUDENT_STATUS_NEEDS_ADJUSTMENT) return STUDENT_STATUS_NEEDS_ADJUSTMENT;
+  return STUDENT_STATUS_ADJUSTING;
 }
 
 function studentStatusClass(status) {
-  return status === STUDENT_STATUS_COMPLETE
-    ? "student-status-complete"
-    : "student-status-adjusting";
+  if (status === STUDENT_STATUS_COMPLETE) return "student-status-complete";
+  if (status === STUDENT_STATUS_NEEDS_ADJUSTMENT) return "student-status-needs-adjustment";
+  return "student-status-adjusting";
 }
 
 function getSelectedStudent() {
@@ -292,9 +437,8 @@ function toAssignmentSnapshot(assignment, studentId = state.selectedStudentId) {
 }
 
 function pushAssignmentHistory(action) {
+  void action;
   if (isApplyingAssignmentHistory) return;
-  assignmentUndoStack.push(action);
-  assignmentRedoStack.length = 0;
 }
 
 function isEditableElement(target) {
@@ -312,7 +456,7 @@ async function ensureStudentContext(studentId) {
   const combo = document.getElementById("student-combo");
   if (combo) combo.value = student ? student.name : "";
   updateStudentPlaceholder();
-  await loadTimetable();
+  await loadTimetable({ preferEnrolledSubject: true });
 }
 
 async function createAssignmentFromSnapshot(snapshot) {
@@ -353,7 +497,7 @@ async function applyAssignmentHistoryAction(action, mode) {
 
   await ensureStudentContext(context.student_id);
   if (!state.timetable) {
-    await loadTimetable();
+    await loadTimetable({ preferEnrolledSubject: true });
   }
 
   if (target) {
@@ -362,7 +506,8 @@ async function applyAssignmentHistoryAction(action, mode) {
     await deleteAssignmentBySnapshot(opposite);
   }
 
-  await loadTimetable();
+  updateStudentPlaceholder();
+  await loadTimetable({ preferEnrolledSubject: true });
 }
 
 async function undoAssignmentChange() {
@@ -615,9 +760,15 @@ function renderStudentMetaPanel() {
   const sendBtn = document.getElementById("student-note-send-btn");
   const trashToggleBtn = document.getElementById("student-note-trash-toggle-btn");
   if (!statusSelect || !composeInput || !sendBtn || !trashToggleBtn) return;
+  const completeOption = Array.from(statusSelect.options).find((o) => o.value === STUDENT_STATUS_COMPLETE);
+  let autoNeedsOption = Array.from(statusSelect.options).find(
+    (o) => o.value === STUDENT_STATUS_NEEDS_ADJUSTMENT
+  );
 
   const selected = getSelectedStudent();
   if (!selected) {
+    if (completeOption) completeOption.disabled = false;
+    if (autoNeedsOption) autoNeedsOption.remove();
     statusSelect.value = STUDENT_STATUS_ADJUSTING;
     statusSelect.disabled = true;
     composeInput.disabled = true;
@@ -631,8 +782,31 @@ function renderStudentMetaPanel() {
   composeInput.disabled = false;
   sendBtn.disabled = false;
   trashToggleBtn.disabled = false;
-  statusSelect.value = studentStatusText(selected.status);
+  const hasErrors = selectedStudentHasErrors();
+  if (completeOption) completeOption.disabled = hasErrors;
+  const isAutoNeedsAdjustment =
+    selected.status === STUDENT_STATUS_NEEDS_ADJUSTMENT || hasErrors;
+  statusSelect.disabled = isAutoNeedsAdjustment;
+
+  if (selected.status === STUDENT_STATUS_NEEDS_ADJUSTMENT) {
+    if (!autoNeedsOption) {
+      autoNeedsOption = document.createElement("option");
+      autoNeedsOption.value = STUDENT_STATUS_NEEDS_ADJUSTMENT;
+      autoNeedsOption.textContent = "要調整（自動）";
+      autoNeedsOption.disabled = true;
+      statusSelect.appendChild(autoNeedsOption);
+    }
+    statusSelect.value = STUDENT_STATUS_NEEDS_ADJUSTMENT;
+  } else {
+    if (autoNeedsOption) autoNeedsOption.remove();
+    statusSelect.value = studentStatusText(selected.status);
+  }
   renderStudentNotesFeed();
+}
+
+function selectedStudentHasErrors() {
+  const assignments = (state.timetable && state.timetable.assignments) || [];
+  return assignments.some((a) => Boolean(a.has_conflict));
 }
 
 async function loadStudentNotes() {
@@ -712,10 +886,10 @@ function showFlash(message, type = "info") {
   el.textContent = message;
   el.classList.remove("hidden", "error");
   if (type === "error") el.classList.add("error");
-  if (flashTimer) clearTimeout(flashTimer);
-  flashTimer = setTimeout(() => {
-    el.classList.add("hidden");
-  }, 5000);
+  if (flashTimer) {
+    clearTimeout(flashTimer);
+    flashTimer = null;
+  }
 }
 
 function buildSubjectSelect(enrolledSubjects) {
@@ -749,7 +923,16 @@ function buildSubjectSelect(enrolledSubjects) {
   }
 }
 
-async function loadTimetable() {
+function hasSelectableSubjectOption(subject) {
+  const subjectSelect = document.getElementById("subject-select");
+  if (!subjectSelect || !subject) return false;
+  return Array.from(subjectSelect.options).some((option) => option.value === subject);
+}
+
+async function loadTimetable(options = {}) {
+  const { preferEnrolledSubject = false } = options;
+  const previousTimetableStudentId = state.timetable?.student?.id ?? null;
+  dragTeacherCache.clear();
   if (!state.selectedStudentId) {
     state.timetable = {
       student: null,
@@ -767,21 +950,30 @@ async function loadTimetable() {
     return;
   }
   state.timetable = await api(`/api/students/${state.selectedStudentId}/timetable`);
+  state.students = await api("/api/students");
+  const latestSelected = state.students.find((s) => s.id === state.selectedStudentId);
+  const studentCombo = document.getElementById("student-combo");
+  if (studentCombo && latestSelected) studentCombo.value = latestSelected.name;
+  renderStudentOptions(studentCombo ? studentCombo.value : "");
+  updateStudentPlaceholder();
   await loadStudentNotes();
   editingStudentNoteId = null;
-  buildSubjectSelect(state.timetable.enrolled_subjects || []);
-  if (
-    !state.selectedSubject ||
-    !Array.from(document.getElementById("subject-select").options).some(
-      (o) => o.value === state.selectedSubject
-    )
-  ) {
-    const first = Array.from(document.getElementById("subject-select").options).find(
-      (o) => o.value && !o.disabled
-    );
-    state.selectedSubject = first ? first.value : null;
+  const enrolledSubjects = state.timetable.enrolled_subjects || [];
+  buildSubjectSelect(enrolledSubjects);
+  const subjectSelectEl = document.getElementById("subject-select");
+  const firstEnrolled = Array.from(subjectSelectEl.options).find((o) => o.value && !o.disabled);
+  const isStudentChanged = Number(previousTimetableStudentId) !== Number(state.selectedStudentId);
+  const shouldChooseDefaultSubject =
+    !hasSelectableSubjectOption(state.selectedSubject) ||
+    (preferEnrolledSubject && (isStudentChanged || !state.selectedSubject));
+  if (shouldChooseDefaultSubject) {
+    state.selectedSubject = firstEnrolled ? firstEnrolled.value : null;
   }
   document.getElementById("subject-select").value = state.selectedSubject || "";
+  await refreshCurrentSubjectView();
+}
+
+async function refreshCurrentSubjectView() {
   state.conflicts = await api("/api/conflicts");
   if (!state.selectedSubject) {
     state.slotSummary = [];
@@ -822,6 +1014,7 @@ function render() {
   renderContextBar();
   renderStudentMetaPanel();
   renderCounts();
+  renderTeacherPalette();
   renderConflictBar();
   renderGrid();
   renderTeacherPanel();
@@ -850,9 +1043,367 @@ function renderContextBar() {
 
 function renderCounts() {
   const el = document.getElementById("subject-counts");
+  if (!el) return;
   const counts = state.timetable.subject_counts || {};
-  const parts = Object.entries(counts).map(([subject, count]) => `${subject}: ${count}コマ`);
-  el.textContent = parts.length > 0 ? `登録済み: ${parts.join(" / ")}` : "登録済み: なし";
+  const subjectOrder = new Map(
+    ((state.meta && state.meta.subjects) || []).map((s, i) => [String(s), i])
+  );
+  const entries = Object.entries(counts).sort(
+    ([s1], [s2]) =>
+      (subjectOrder.get(String(s1)) ?? Number.MAX_SAFE_INTEGER) -
+        (subjectOrder.get(String(s2)) ?? Number.MAX_SAFE_INTEGER) ||
+      String(s1).localeCompare(String(s2))
+  );
+  el.innerHTML = "";
+
+  const label = document.createElement("span");
+  label.className = "counts-label";
+  label.textContent = "登録済み:";
+  el.appendChild(label);
+
+  if (entries.length === 0) {
+    const empty = document.createElement("span");
+    empty.textContent = "なし";
+    el.appendChild(empty);
+    return;
+  }
+
+  const list = document.createElement("span");
+  list.className = "counts-list";
+  for (const [subject, count] of entries) {
+    const chip = document.createElement("span");
+    chip.className = `count-chip subject-${subjectTone(subject)}`;
+    chip.textContent = `${subject}: ${count}コマ`;
+    list.appendChild(chip);
+  }
+  el.appendChild(list);
+}
+
+function slotKey(date, period) {
+  return `${date}#${period}`;
+}
+
+function getTimetableAssignments() {
+  return (state.timetable && state.timetable.assignments) || [];
+}
+
+function getAssignmentAt(date, period, excludeAssignmentId = null) {
+  return getTimetableAssignments().find(
+    (a) => a.date === date && Number(a.period) === Number(period) && a.id !== excludeAssignmentId
+  );
+}
+
+function buildTeacherPalettePairs() {
+  const counts = new Map();
+  for (const a of getTimetableAssignments()) {
+    if (!a.teacher_id || !a.subject) continue;
+    const key = `${a.teacher_id}#${a.subject}`;
+    if (!counts.has(key)) {
+      counts.set(key, {
+        teacher_id: Number(a.teacher_id),
+        teacher_name: a.teacher_name,
+        subject: a.subject,
+        used_count: 0,
+      });
+    }
+    counts.get(key).used_count += 1;
+  }
+  const subjectOrder = new Map(
+    ((state.meta && state.meta.subjects) || []).map((s, i) => [String(s), i])
+  );
+  return [...counts.values()].sort(
+    (x, y) =>
+      (subjectOrder.get(x.subject) ?? Number.MAX_SAFE_INTEGER) -
+        (subjectOrder.get(y.subject) ?? Number.MAX_SAFE_INTEGER) ||
+      x.subject.localeCompare(y.subject) ||
+      x.teacher_name.localeCompare(y.teacher_name)
+  );
+}
+
+function renderTeacherPalette() {
+  const section = document.getElementById("teacher-palette-section");
+  const box = document.getElementById("teacher-palette");
+  if (!section || !box) return;
+
+  const pairs = buildTeacherPalettePairs();
+  box.innerHTML = "";
+  if (!pairs.length) {
+    section.classList.add("hidden");
+    return;
+  }
+
+  section.classList.remove("hidden");
+  for (const pair of pairs) {
+    const chip = document.createElement("button");
+    chip.type = "button";
+    chip.className = `teacher-chip subject-${subjectTone(pair.subject)}`;
+    chip.innerHTML = `<span class="teacher-chip-name">${pair.teacher_name}</span><span class="teacher-chip-count">${pair.used_count}回</span>`;
+    chip.addEventListener("pointerdown", async (e) => {
+      if (e.pointerType === "mouse" && e.button !== 0) return;
+      e.preventDefault();
+      await startDragFromPalette(pair, e.clientX, e.clientY);
+    });
+    box.appendChild(chip);
+  }
+}
+
+async function ensureDragTeacherCache(teacherId) {
+  if (dragTeacherCache.has(teacherId)) return dragTeacherCache.get(teacherId);
+  if (!state.selectedStudentId) return null;
+  const panel = await api(`/api/teacher-panel?student_id=${state.selectedStudentId}&teacher_id=${teacherId}`);
+  const availability = new Set((panel.availability || []).map((x) => slotKey(x.date, Number(x.period))));
+  const busySlots = new Set((panel.assignments || []).map((x) => slotKey(x.date, Number(x.period))));
+  const data = { availability, busySlots };
+  dragTeacherCache.set(teacherId, data);
+  return data;
+}
+
+function clearDragHoverCell() {
+  if (!dragState || !dragState.hoverCell) return;
+  dragState.hoverCell.classList.remove("drag-drop-ok", "drag-drop-warn", "drag-drop-no");
+}
+
+function getCellFromPoint(clientX, clientY) {
+  const els = document.elementsFromPoint(clientX, clientY);
+  return (
+    els.find(
+      (el) =>
+        el instanceof HTMLElement &&
+        el.classList.contains("cell") &&
+        el.dataset.date &&
+        el.dataset.period
+    ) || null
+  );
+}
+
+function evaluateDropCell(cell) {
+  if (!dragState || !cell) return { ok: false, cls: "drag-drop-no", reason: "配置不可" };
+  const date = String(cell.dataset.date || "");
+  const period = Number(cell.dataset.period || 0);
+  const slot = slotKey(date, period);
+  const availabilitySet = new Set(
+    ((state.timetable && state.timetable.availability) || []).map((x) => slotKey(x.date, Number(x.period)))
+  );
+  if (!availabilitySet.has(slot)) return { ok: false, cls: "drag-drop-no", reason: "生徒予定外" };
+
+  const existing = getAssignmentAt(date, period, dragState.sourceAssignmentId);
+  if (existing) return { ok: false, cls: "drag-drop-no", reason: "既に割当あり" };
+
+  const cache = dragState.teacherCache;
+  if (!cache || !cache.availability.has(slot)) {
+    return { ok: false, cls: "drag-drop-no", reason: "講師出勤不可" };
+  }
+
+  const isBusy = cache.busySlots.has(slot) && slot !== dragState.sourceSlotKey;
+  return {
+    ok: true,
+    cls: isBusy ? "drag-drop-warn" : "drag-drop-ok",
+    reason: isBusy ? "講師重複" : "配置可",
+    date,
+    period,
+  };
+}
+
+async function getAutoTableId(date, period, excludeAssignmentId = null) {
+  const res = await api(`/api/used-tables?date=${encodeURIComponent(date)}&period=${period}`);
+  const used = new Set((res.used_table_ids || []).map(String));
+
+  if (excludeAssignmentId != null) {
+    const self = getTimetableAssignments().find((a) => a.id === excludeAssignmentId);
+    if (self && self.date === date && Number(self.period) === Number(period)) {
+      used.delete(String(self.table_id));
+    }
+  }
+
+  const free = ((state.meta && state.meta.table_ids) || []).find((t) => !used.has(String(t)));
+  return free || null;
+}
+
+function startDragCommon(pair, sourceAssignmentId, clientX, clientY) {
+  if (dragState) cancelDragState();
+  const ghost = document.createElement("div");
+  ghost.className = `drag-ghost subject-${subjectTone(pair.subject)}`;
+  ghost.textContent = `${pair.teacher_name} / ${pair.subject}`;
+  ghost.style.left = `${clientX}px`;
+  ghost.style.top = `${clientY}px`;
+  document.body.appendChild(ghost);
+
+  const sourceAssignment = sourceAssignmentId
+    ? getTimetableAssignments().find((a) => a.id === sourceAssignmentId)
+    : null;
+
+  dragState = {
+    pair,
+    teacherCache: null,
+    sourceAssignmentId,
+    sourceSlotKey: sourceAssignment ? slotKey(sourceAssignment.date, Number(sourceAssignment.period)) : null,
+    hoverCell: null,
+    ghost,
+    startX: clientX,
+    startY: clientY,
+    moved: false,
+  };
+
+  document.addEventListener("pointermove", handleDragPointerMove);
+  document.addEventListener("pointerup", handleDragPointerUp, { once: true });
+}
+
+async function startDragFromPalette(pair, clientX, clientY) {
+  if (!state.selectedStudentId) return;
+  startDragCommon(pair, null, clientX, clientY);
+  try {
+    dragState.teacherCache = await ensureDragTeacherCache(pair.teacher_id);
+  } catch (err) {
+    cancelDragState();
+    showFlash(`講師情報の取得失敗: ${err.message}`, "error");
+  }
+}
+
+async function startDragFromAssignment(assignment, clientX, clientY) {
+  if (!assignment || !assignment.teacher_id) return;
+  const pair = {
+    teacher_id: Number(assignment.teacher_id),
+    teacher_name: assignment.teacher_name,
+    subject: assignment.subject,
+  };
+  startDragCommon(pair, assignment.id, clientX, clientY);
+  try {
+    dragState.teacherCache = await ensureDragTeacherCache(pair.teacher_id);
+  } catch (err) {
+    cancelDragState();
+    showFlash(`講師情報の取得失敗: ${err.message}`, "error");
+  }
+}
+
+function handleDragPointerMove(e) {
+  if (!dragState) return;
+  dragState.ghost.style.left = `${e.clientX}px`;
+  dragState.ghost.style.top = `${e.clientY}px`;
+  if (Math.abs(e.clientX - dragState.startX) > 4 || Math.abs(e.clientY - dragState.startY) > 4) {
+    dragState.moved = true;
+  }
+
+  const cell = getCellFromPoint(e.clientX, e.clientY);
+  if (cell !== dragState.hoverCell) {
+    clearDragHoverCell();
+    dragState.hoverCell = cell;
+  }
+  if (!cell) return;
+  const result = evaluateDropCell(cell);
+  cell.classList.remove("drag-drop-ok", "drag-drop-warn", "drag-drop-no");
+  cell.classList.add(result.cls);
+}
+
+function cancelDragState() {
+  if (!dragState) return;
+  clearDragHoverCell();
+  document.removeEventListener("pointermove", handleDragPointerMove);
+  if (dragState.ghost) dragState.ghost.remove();
+  dragState = null;
+}
+
+async function handleDragPointerUp(e) {
+  if (!dragState) return;
+  const current = dragState;
+  const cell = getCellFromPoint(e.clientX, e.clientY);
+  const result = cell ? evaluateDropCell(cell) : null;
+  cancelDragState();
+
+  try {
+    if (!cell) return;
+    if (!current.moved && current.sourceAssignmentId) {
+      const source = getTimetableAssignments().find((a) => a.id === current.sourceAssignmentId);
+      if (source) {
+        await openTeacherModal(source.date, source.period, source);
+      }
+      return;
+    }
+
+    if (!result || !result.ok) {
+      showFlash(`配置不可: ${result ? result.reason : "不明"}`, "error");
+      return;
+    }
+
+    const tableId = await getAutoTableId(result.date, result.period, current.sourceAssignmentId);
+    if (!tableId) {
+      showFlash("配置不可: 空きテーブルがありません", "error");
+      return;
+    }
+
+    if (current.sourceAssignmentId) {
+      const source = getTimetableAssignments().find((a) => a.id === current.sourceAssignmentId);
+      if (!source) return;
+      if (source.date === result.date && Number(source.period) === Number(result.period)) return;
+
+      const before = toAssignmentSnapshot(source);
+      const created = await api("/api/assignments", {
+        method: "POST",
+        body: JSON.stringify({
+          student_id: state.selectedStudentId,
+          teacher_id: current.pair.teacher_id,
+          table_id: tableId,
+          subject: current.pair.subject,
+          date: result.date,
+          period: result.period,
+        }),
+      });
+
+      try {
+        await api(`/api/assignments/${source.id}`, { method: "DELETE" });
+      } catch (err) {
+        await api(`/api/assignments/${created.id}`, { method: "DELETE" }).catch(() => {});
+        throw err;
+      }
+
+      const after = {
+        id: created.id,
+        student_id: state.selectedStudentId,
+        teacher_id: current.pair.teacher_id,
+        table_id: tableId,
+        subject: current.pair.subject,
+        date: result.date,
+        period: result.period,
+      };
+      pushAssignmentHistory({ before, after });
+      await loadTimetable();
+      showFlash(
+        result.cls === "drag-drop-warn"
+          ? "移動しました（講師重複あり）"
+          : "移動しました"
+      );
+      return;
+    }
+
+    const created = await api("/api/assignments", {
+      method: "POST",
+      body: JSON.stringify({
+        student_id: state.selectedStudentId,
+        teacher_id: current.pair.teacher_id,
+        table_id: tableId,
+        subject: current.pair.subject,
+        date: result.date,
+        period: result.period,
+      }),
+    });
+    const after = {
+      id: created.id,
+      student_id: state.selectedStudentId,
+      teacher_id: current.pair.teacher_id,
+      table_id: tableId,
+      subject: current.pair.subject,
+      date: result.date,
+      period: result.period,
+    };
+    pushAssignmentHistory({ before: null, after });
+    await loadTimetable();
+    showFlash(
+      result.cls === "drag-drop-warn"
+        ? "割り当てました（講師重複あり）"
+        : "割り当てました"
+    );
+  } catch (err) {
+    showFlash(`ドラッグ操作失敗: ${err.message}`, "error");
+  }
 }
 
 function renderConflictBar() {
@@ -923,7 +1474,7 @@ async function jumpToConflictStudent(date, period, studentName) {
   state.selectedStudentId = targetStudent.id;
   const combo = document.getElementById("student-combo");
   if (combo) combo.value = targetStudent.name;
-  await loadTimetable();
+  await loadTimetable({ preferEnrolledSubject: true });
 
   const assignment =
     (state.timetable.assignments || []).find(
@@ -948,7 +1499,7 @@ async function jumpToStudentFromTeacherPanel(studentName) {
   const combo = document.getElementById("student-combo");
   if (combo) combo.value = targetStudent.name;
   updateStudentPlaceholder();
-  await loadTimetable();
+  await loadTimetable({ preferEnrolledSubject: true });
   const topGrid = document.querySelector(".grid-wrap");
   if (topGrid) {
     topGrid.scrollIntoView({ behavior: "smooth", block: "start" });
@@ -998,6 +1549,8 @@ function renderGrid() {
     for (const date of dates) {
       const td = document.createElement("td");
       td.className = "cell";
+      td.dataset.date = date;
+      td.dataset.period = String(period);
       const key = `${date}#${period}`;
       const available = availabilitySet.has(key);
       const assignment = assignmentMap.get(key);
@@ -1017,12 +1570,43 @@ function renderGrid() {
         if (assignment.has_table_conflict) reasons.push("席重複");
         if (assignment.has_schedule_mismatch) reasons.push("講師予定不一致");
         if (assignment.has_student_schedule_mismatch) reasons.push("生徒予定不一致");
+        const titleParts = [`${assignment.subject} / ${assignment.teacher_name} / ${assignment.table_id}`];
+        if (reasons.length) titleParts.push(`エラー: ${reasons.join(" / ")}`);
+        td.title = titleParts.join("\n");
         const tone = subjectTone(assignment.subject);
-        td.innerHTML = `<div class="cell-main"><span class="assignment-pill subject-${tone}"><span class="subject-chip">${subjectAbbrev(
-          assignment.subject
-        )}</span> ${assignment.teacher_name} ${assignment.table_id}</span></div>${
+        td.innerHTML = `<div class="cell-main"><span class="assignment-pill subject-${tone}"><span class="assignment-name">${assignment.teacher_name}</span><span class="assignment-table">${assignment.table_id}</span></span></div>${
           reasons.length ? `<div class=\"cell-reason\">${reasons.join(" / ")}</div>` : ""
         }`;
+        const assignmentPill = td.querySelector(".assignment-pill");
+        if (assignmentPill) {
+          assignmentPill.style.cursor = "grab";
+          assignmentPill.addEventListener("pointerdown", async (e) => {
+            if (e.pointerType === "mouse" && e.button !== 0) return;
+            e.preventDefault();
+            e.stopPropagation();
+            await startDragFromAssignment(assignment, e.clientX, e.clientY);
+          });
+        }
+        const deleteBtn = document.createElement("button");
+        deleteBtn.type = "button";
+        deleteBtn.className = "cell-assignment-delete-btn";
+        deleteBtn.textContent = "×";
+        deleteBtn.title = "この割り当てを削除";
+        deleteBtn.setAttribute("aria-label", "この割り当てを削除");
+        deleteBtn.addEventListener("click", async (e) => {
+          e.preventDefault();
+          e.stopPropagation();
+          try {
+            const before = toAssignmentSnapshot(assignment);
+            await api(`/api/assignments/${assignment.id}`, { method: "DELETE" });
+            pushAssignmentHistory({ before, after: null });
+            await loadTimetable();
+            showFlash("割り当てを削除しました");
+          } catch (err) {
+            showFlash(`削除失敗: ${err.message}`, "error");
+          }
+        });
+        td.appendChild(deleteBtn);
         td.addEventListener("click", () => openTeacherModal(date, period, assignment));
       } else if (!available) {
         td.classList.add("unavailable");
@@ -1066,6 +1650,7 @@ function renderTeacherPanel() {
   renderTeacherOptions(filterText);
   updateTeacherPlaceholder();
   renderTeacherSubjects();
+  renderTeacherMemo();
   renderTeacherGrid();
 }
 
@@ -1078,6 +1663,21 @@ function renderTeacherSubjects() {
     return;
   }
   box.textContent = `担当科目: ${subjects.join(" / ")}`;
+}
+
+function renderTeacherMemo() {
+  const box = document.getElementById("teacher-note");
+  if (!box) return;
+  const teachers = (state.teacherPanel && state.teacherPanel.teachers) || [];
+  const selected = teachers.find((t) => t.teacher_id === state.selectedTeacherId);
+  const memo = selected && selected.memo ? String(selected.memo).trim() : "";
+  if (!memo) {
+    box.classList.add("hidden");
+    box.textContent = "";
+    return;
+  }
+  box.textContent = `備考: ${memo}`;
+  box.classList.remove("hidden");
 }
 
 function updateTeacherPanelToggleLabel() {
@@ -1100,6 +1700,8 @@ function renderTeacherOptions(filterText) {
   const teachers = (state.teacherPanel && state.teacherPanel.teachers) || [];
   const keyword = (filterText || "").trim();
   const filtered = keyword ? teachers.filter((t) => t.name.includes(keyword)) : teachers;
+  teacherDropdownOptions = filtered;
+  activeTeacherOptionIndex = -1;
   const registered = filtered.filter((t) => t.is_registered_for_student);
   const others = filtered.filter((t) => !t.is_registered_for_student);
 
@@ -1113,6 +1715,7 @@ function renderTeacherOptions(filterText) {
     for (const teacher of list) {
       const row = document.createElement("div");
       row.className = "teacher-option";
+      row.dataset.teacherOption = "1";
       const suffix = teacher.student_assignment_count > 0 ? `（${teacher.student_assignment_count}回）` : "";
       row.textContent = `${teacher.name}${suffix}`;
       row.addEventListener("mousedown", async (e) => {
@@ -1136,6 +1739,40 @@ function renderTeacherOptions(filterText) {
     empty.textContent = "該当なし";
     dropdown.appendChild(empty);
   }
+}
+
+function setActiveTeacherOption(index) {
+  const dropdown = document.getElementById("teacher-dropdown");
+  if (!dropdown) return;
+  const optionEls = Array.from(dropdown.querySelectorAll('[data-teacher-option="1"]'));
+  optionEls.forEach((el) => el.classList.remove("teacher-option-active"));
+  if (!optionEls.length) {
+    activeTeacherOptionIndex = -1;
+    return;
+  }
+  if (index < 0 || index >= optionEls.length) {
+    activeTeacherOptionIndex = -1;
+    return;
+  }
+  activeTeacherOptionIndex = index;
+  const activeEl = optionEls[index];
+  activeEl.classList.add("teacher-option-active");
+  activeEl.scrollIntoView({ block: "nearest" });
+}
+
+async function selectTeacherFromDropdown(teacher) {
+  if (!teacher) return;
+  const combo = document.getElementById("teacher-combo");
+  if (combo) combo.value = teacher.name;
+  if (teacher.teacher_id === state.selectedTeacherId) {
+    hideTeacherDropdown();
+    return;
+  }
+  state.selectedTeacherId = teacher.teacher_id;
+  updateTeacherPlaceholder();
+  hideTeacherDropdown();
+  await loadTeacherPanel();
+  renderTeacherPanel();
 }
 
 function renderTeacherGrid() {
@@ -1231,6 +1868,7 @@ function hideTeacherDropdown() {
   const dropdown = document.getElementById("teacher-dropdown");
   if (!dropdown) return;
   dropdown.classList.add("hidden");
+  activeTeacherOptionIndex = -1;
 }
 
 function isTeacherDropdownVisible() {
@@ -1339,8 +1977,6 @@ async function openTeacherModal(date, period, existingAssignment) {
   if (existingAssignment) {
     removeBtn.classList.remove("hidden");
     removeBtn.onclick = async () => {
-      const ok = await showConfirmModal("この割り当てを解除しますか？");
-      if (!ok) return;
       const before = toAssignmentSnapshot(existingAssignment);
       await api(`/api/assignments/${existingAssignment.id}`, { method: "DELETE" });
       pushAssignmentHistory({ before, after: null });
@@ -1357,6 +1993,9 @@ async function openTeacherModal(date, period, existingAssignment) {
 
 function closeModal() {
   document.getElementById("teacher-modal").classList.add("hidden");
+  if (pendingRealtimeRefresh) {
+    scheduleRealtimeRefresh();
+  }
 }
 
 function showConfirmModal(message) {
@@ -1405,6 +2044,7 @@ async function syncScheduleFromFile() {
   try {
     const previewRes = await fetch("/api/sync-upload", {
       method: "POST",
+      headers: getRequestHeaders(),
       body: formData,
     });
     const preview = await previewRes.json();
@@ -1430,6 +2070,7 @@ async function syncScheduleFromFile() {
     applyFormData.append("file", file);
     const res = await fetch("/api/sync-upload/apply", {
       method: "POST",
+      headers: getRequestHeaders(),
       body: applyFormData,
     });
     const result = await res.json();
@@ -1440,7 +2081,7 @@ async function syncScheduleFromFile() {
     const label = result.kind === "teacher" ? "講師予定" : "生徒予定";
     showFlash(`${label}反映完了: 取込${result.imported_count}件 / 削除${result.removed_count}件`);
     await loadBaseData({ preserveSelection: true });
-    await loadTimetable();
+    await loadTimetable({ preferEnrolledSubject: true });
     input.value = "";
   } catch (err) {
     showFlash(`取り込み失敗: ${err.message}`, "error");
@@ -1452,10 +2093,106 @@ async function resetCurrentAssignments() {
   if (!ok) return;
   try {
     const result = await api("/api/assignments/reset", { method: "POST" });
-    await loadTimetable();
+    await loadTimetable({ preferEnrolledSubject: true });
     showFlash(`登録をリセットしました（${result.deleted_assignments}件削除）`);
   } catch (err) {
     showFlash(`リセット失敗: ${err.message}`, "error");
+  }
+}
+
+function normalizeSubjectForSpreadsheet(subject) {
+  const s = String(subject || "");
+  if (/算数/.test(s)) return "算数";
+  if (/中学数学|数学Ⅰ・A|数学Ⅱ・B|数学Ⅲ・C|情報/.test(s)) return "数学";
+  if (/中学受験国語|中学国語/.test(s)) return "国語";
+  if (/現代文/.test(s)) return "現代文";
+  if (/古文|漢文/.test(s)) return "古文・漢文";
+  if (/中学受験理科|中学理科|地学/.test(s)) return "理科";
+  if (/物理/.test(s)) return "物理";
+  if (/化学/.test(s)) return "化学";
+  if (/生物/.test(s)) return "生物";
+  if (/中学受験社会|中学社会|倫政|公共/.test(s)) return "社会";
+  if (/日本史/.test(s)) return "日本史";
+  if (/世界史/.test(s)) return "世界史";
+  if (/地理/.test(s)) return "地理";
+  if (/中学英語|高校英語|英語/.test(s)) return "英語";
+  return s;
+}
+
+function formatDateForSpreadsheet(isoDate) {
+  return String(isoDate || "").replaceAll("-", "/");
+}
+
+function formatPeriodForSpreadsheet(period) {
+  const label = state.meta?.period_labels?.[String(period)] || `${period}限`;
+  return String(label || `${period}限`);
+}
+
+function buildSpreadsheetCopyText() {
+  const assignments = (state.timetable && state.timetable.assignments) || [];
+  const selectedStudent = getSelectedStudent();
+  const studentName =
+    (state.timetable && state.timetable.student && state.timetable.student.name) ||
+    (selectedStudent && selectedStudent.name) ||
+    "";
+
+  const sorted = [...assignments].sort((a, b) => {
+    if (a.date !== b.date) return a.date < b.date ? -1 : 1;
+    return Number(a.period) - Number(b.period);
+  });
+
+  const rows = sorted.map((a) => {
+    return [
+      studentName,
+      a.teacher_name || "",
+      normalizeSubjectForSpreadsheet(a.subject),
+      formatDateForSpreadsheet(a.date),
+      formatPeriodForSpreadsheet(a.period),
+    ];
+  });
+
+  return {
+    rows,
+    text: rows.map((r) => r.join("\t")).join("\n"),
+  };
+}
+
+async function copyTextToClipboard(text) {
+  if (navigator.clipboard && navigator.clipboard.writeText) {
+    await navigator.clipboard.writeText(text);
+    return;
+  }
+
+  const ta = document.createElement("textarea");
+  ta.value = text;
+  ta.setAttribute("readonly", "readonly");
+  ta.style.position = "fixed";
+  ta.style.left = "-9999px";
+  document.body.appendChild(ta);
+  ta.select();
+  const ok = document.execCommand("copy");
+  document.body.removeChild(ta);
+  if (!ok) {
+    throw new Error("クリップボードにコピーできませんでした");
+  }
+}
+
+async function copyAssignmentsForSpreadsheet() {
+  if (!state.selectedStudentId) {
+    showFlash("先に生徒を選択してください", "error");
+    return;
+  }
+  const { rows, text } = buildSpreadsheetCopyText();
+  if (!rows.length) {
+    showFlash("コピー対象の授業がありません", "error");
+    return;
+  }
+  try {
+    await copyTextToClipboard(text);
+    showFlash(`コピペ用をコピーしました（${rows.length}行）`);
+  } catch (err) {
+    window.prompt("コピーできなかったので、以下を手動コピーしてください", text);
+    showFlash(`手動コピーを表示しました: ${err.message}`, "error");
   }
 }
 
@@ -1471,6 +2208,7 @@ function bindEvents() {
   const cancelBtn = document.getElementById("cancel-modal-btn");
   const modal = document.getElementById("teacher-modal");
   const syncBtn = document.getElementById("sync-upload-btn");
+  const copyPasteBtn = document.getElementById("copy-paste-btn");
   const resetBtn = document.getElementById("reset-assignments-btn");
   const studentStatusSelect = document.getElementById("student-status-select");
   const studentNoteComposeInput = document.getElementById("student-note-compose-input");
@@ -1486,7 +2224,7 @@ function bindEvents() {
     state.selectedStudentId = target.id;
     if (studentCombo) studentCombo.value = target.name;
     updateStudentPlaceholder();
-    await loadTimetable();
+    await loadTimetable({ preferEnrolledSubject: true });
   };
 
   if (studentCombo) {
@@ -1562,28 +2300,10 @@ function bindEvents() {
       hideStudentDropdown();
     }
   });
-  document.addEventListener("keydown", async (e) => {
-    if (isEditableElement(e.target)) return;
-    const isMod = e.ctrlKey || e.metaKey;
-    if (!isMod || e.altKey) return;
-
-    const key = e.key.toLowerCase();
-    const isUndo = key === "z" && !e.shiftKey;
-    const isRedo = key === "y" || (key === "z" && e.shiftKey);
-
-    if (!isUndo && !isRedo) return;
-    e.preventDefault();
-    if (isUndo) {
-      await undoAssignmentChange();
-    } else {
-      await redoAssignmentChange();
-    }
-  });
-
   if (subjectSelect) {
     subjectSelect.addEventListener("change", async (e) => {
       state.selectedSubject = e.target.value;
-      await loadTimetable();
+      await refreshCurrentSubjectView();
     });
   }
 
@@ -1615,7 +2335,31 @@ function bindEvents() {
       await resolveTeacherFromInput(e.target.value);
     });
     teacherCombo.addEventListener("keydown", async (e) => {
+      if (e.key === "ArrowDown" || e.key === "ArrowUp") {
+        e.preventDefault();
+        if (!isTeacherDropdownVisible()) {
+          renderTeacherOptions(teacherCombo.value);
+          showTeacherDropdown();
+        }
+        const count = teacherDropdownOptions.length;
+        if (!count) return;
+        const dir = e.key === "ArrowDown" ? 1 : -1;
+        let next = activeTeacherOptionIndex;
+        if (next === -1) {
+          next = dir === 1 ? 0 : count - 1;
+        } else {
+          next = (next + dir + count) % count;
+        }
+        setActiveTeacherOption(next);
+        return;
+      }
       if (e.key === "Enter") {
+        e.preventDefault();
+        if (isTeacherDropdownVisible() && activeTeacherOptionIndex >= 0) {
+          const teacher = teacherDropdownOptions[activeTeacherOptionIndex];
+          await selectTeacherFromDropdown(teacher);
+          return;
+        }
         await resolveTeacherFromInput(e.target.value);
         hideTeacherDropdown();
       }
@@ -1626,15 +2370,14 @@ function bindEvents() {
     });
   }
   if (teacherClearBtn) {
+    teacherClearBtn.addEventListener("mousedown", (e) => {
+      e.preventDefault();
+    });
     teacherClearBtn.addEventListener("click", () => {
       if (!teacherCombo) return;
       teacherCombo.value = "";
       renderTeacherOptions("");
-      if (isTeacherDropdownVisible()) {
-        hideTeacherDropdown();
-      } else {
-        showTeacherDropdown();
-      }
+      showTeacherDropdown();
       updateTeacherPlaceholder();
       teacherCombo.focus();
     });
@@ -1665,6 +2408,11 @@ function bindEvents() {
       await syncScheduleFromFile();
     });
   }
+  if (copyPasteBtn) {
+    copyPasteBtn.addEventListener("click", async () => {
+      await copyAssignmentsForSpreadsheet();
+    });
+  }
   if (resetBtn) {
     resetBtn.addEventListener("click", async () => {
       await resetCurrentAssignments();
@@ -1677,6 +2425,7 @@ function bindEvents() {
         showFlash(`ステータスを更新しました: ${e.target.value}`);
       } catch (err) {
         showFlash(`ステータス更新失敗: ${err.message}`, "error");
+        renderStudentMetaPanel();
       }
     });
   }
@@ -1764,9 +2513,10 @@ function bindAutoShutdownOnTabClose() {
 
 async function main() {
   bindAutoShutdownOnTabClose();
+  connectRealtimeUpdates();
   bindEvents();
   await loadBaseData();
-  await loadTimetable();
+  await loadTimetable({ preferEnrolledSubject: true });
 }
 
 main().catch((err) => {

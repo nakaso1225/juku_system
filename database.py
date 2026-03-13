@@ -78,7 +78,8 @@ def init_db() -> None:
         CREATE TABLE IF NOT EXISTS teachers (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             name TEXT NOT NULL UNIQUE,
-            name_kana TEXT NOT NULL DEFAULT ''
+            name_kana TEXT NOT NULL DEFAULT '',
+            memo TEXT NOT NULL DEFAULT ''
         );
 
         CREATE TABLE IF NOT EXISTS teacher_subjects (
@@ -165,6 +166,12 @@ def init_db() -> None:
     student_cols = {
         row["name"] for row in cur.execute("PRAGMA table_info(students)").fetchall()
     }
+    teacher_cols = {
+        row["name"] for row in cur.execute("PRAGMA table_info(teachers)").fetchall()
+    }
+    if "memo" not in teacher_cols:
+        cur.execute("ALTER TABLE teachers ADD COLUMN memo TEXT NOT NULL DEFAULT ''")
+
     if "table_id" in student_cols:
         cur.execute("PRAGMA foreign_keys = OFF")
         cur.execute(

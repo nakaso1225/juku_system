@@ -11,7 +11,8 @@ from typing import Any
 
 from database import DATES, PERIODS, get_connection
 
-STUDENT_STATUSES = {"調整中", "完了"}
+STUDENT_STATUSES = {"調整中", "要調整", "完了"}
+FORM_NOTE_PREFIX = "【フォーム備考】"
 
 
 @dataclass
@@ -51,9 +52,20 @@ def list_students() -> list[dict[str, Any]]:
     conn = get_connection()
     rows = conn.execute(
         """
-        SELECT id, name, status, memo, memo_updated_at
-        FROM students
-        ORDER BY name
+        SELECT
+            s.id,
+            s.name,
+            s.status,
+            s.memo,
+            s.memo_updated_at,
+            COALESCE(ac.assignment_count, 0) AS assignment_count
+        FROM students s
+        LEFT JOIN (
+            SELECT student_id, COUNT(*) AS assignment_count
+            FROM assignments
+            GROUP BY student_id
+        ) ac ON ac.student_id = s.id
+        ORDER BY s.name
         """
     ).fetchall()
     conn.close()
@@ -68,6 +80,7 @@ def get_teacher_panel(student_id: int, teacher_id: int | None = None) -> dict[st
         SELECT
             t.id AS teacher_id,
             t.name,
+            t.memo,
             COALESCE(sc.student_assignment_count, 0) AS student_assignment_count
         FROM teachers t
         LEFT JOIN (
@@ -87,6 +100,7 @@ def get_teacher_panel(student_id: int, teacher_id: int | None = None) -> dict[st
         {
             "teacher_id": row["teacher_id"],
             "name": row["name"],
+            "memo": row["memo"] or "",
             "student_assignment_count": row["student_assignment_count"],
             "is_registered_for_student": row["student_assignment_count"] > 0,
         }
@@ -321,7 +335,8 @@ def get_available_teachers(
             t.name,
             COALESCE(av.availability_count, 0) AS availability_count,
             COALESCE(cnt.assignment_count, 0) AS assignment_count,
-            slot.student_name AS conflict_with
+            slot.student_name AS conflict_with,
+            COALESCE(slot.conflict_count, 0) AS conflict_count
         FROM teachers t
         JOIN teacher_availability ta
           ON ta.teacher_id = t.id
@@ -342,12 +357,16 @@ def get_available_teachers(
             GROUP BY teacher_id
         ) av ON av.teacher_id = t.id
         LEFT JOIN (
-            SELECT a.teacher_id, s.name AS student_name
+            SELECT
+                a.teacher_id,
+                MIN(s.name) AS student_name,
+                COUNT(*) AS conflict_count
             FROM assignments a
             JOIN students s ON s.id = a.student_id
             WHERE a.date = ?
               AND a.period = ?
               AND a.student_id != ?
+            GROUP BY a.teacher_id
         ) slot ON slot.teacher_id = t.id
         ORDER BY availability_count ASC,
                  assignment_count DESC,
@@ -368,6 +387,7 @@ def get_available_teachers(
             "assignment_count": row["assignment_count"],
             "has_conflict": row["conflict_with"] is not None,
             "conflict_with": row["conflict_with"],
+            "conflict_count": row["conflict_count"] or 0,
         }
         for row in rows
     ]
@@ -484,6 +504,7 @@ def create_assignment(
         (date, period, table_id, student_id),
     ).fetchone()[0]
 
+    _apply_auto_student_status_rules(conn)
     conn.commit()
     conn.close()
 
@@ -500,6 +521,7 @@ def delete_assignment(assignment_id: int) -> bool:
     cur = conn.cursor()
     cur.execute("DELETE FROM assignments WHERE id = ?", (assignment_id,))
     deleted = cur.rowcount > 0
+    _apply_auto_student_status_rules(conn)
     conn.commit()
     conn.close()
     return deleted
@@ -518,6 +540,8 @@ def update_student_status_and_memo(
         status = status.strip()
         if status not in STUDENT_STATUSES:
             raise ValueError("invalid status")
+        if status == "要調整":
+            raise ValueError("要調整はシステムが自動設定します")
 
     if memo is not None:
         memo = memo.strip()
@@ -529,6 +553,10 @@ def update_student_status_and_memo(
     if not row:
         conn.close()
         raise ValueError("student not found")
+    has_error = _student_has_error(conn, student_id)
+    if status is not None and has_error:
+        conn.close()
+        raise ValueError("エラー解消まではステータスを変更できません（要調整を確認してください）")
 
     updates: list[str] = []
     params: list[Any] = []
@@ -735,9 +763,88 @@ def reset_assignments() -> int:
     cur = conn.cursor()
     deleted_count = cur.execute("SELECT COUNT(*) FROM assignments").fetchone()[0]
     cur.execute("DELETE FROM assignments")
+    _apply_auto_student_status_rules(conn)
     conn.commit()
     conn.close()
     return int(deleted_count)
+
+
+def _student_has_error(conn, student_id: int) -> bool:
+    row = conn.execute(
+        """
+        SELECT EXISTS(
+            SELECT 1
+            FROM assignments a
+            WHERE a.student_id = ?
+              AND (
+                    (
+                        a.teacher_id IS NOT NULL
+                        AND EXISTS (
+                            SELECT 1
+                            FROM assignments a2
+                            WHERE a2.date = a.date
+                              AND a2.period = a.period
+                              AND a2.teacher_id = a.teacher_id
+                              AND a2.student_id != a.student_id
+                        )
+                    )
+                    OR EXISTS (
+                        SELECT 1
+                        FROM assignments a3
+                        WHERE a3.date = a.date
+                          AND a3.period = a.period
+                          AND a3.table_id = a.table_id
+                          AND a3.student_id != a.student_id
+                    )
+                    OR (
+                        a.teacher_id IS NOT NULL
+                        AND (
+                            NOT EXISTS (
+                                SELECT 1
+                                FROM teacher_availability ta
+                                WHERE ta.teacher_id = a.teacher_id
+                                  AND ta.date = a.date
+                                  AND ta.period = a.period
+                            )
+                            OR NOT EXISTS (
+                                SELECT 1
+                                FROM teacher_subjects ts
+                                WHERE ts.teacher_id = a.teacher_id
+                                  AND ts.subject = a.subject
+                            )
+                        )
+                    )
+                    OR NOT EXISTS (
+                        SELECT 1
+                        FROM student_availability sa
+                        WHERE sa.student_id = a.student_id
+                          AND sa.date = a.date
+                          AND sa.period = a.period
+                    )
+                )
+        ) AS has_error
+        """,
+        (student_id,),
+    ).fetchone()
+    return bool(row["has_error"]) if row else False
+
+
+def _apply_auto_student_status_rules(conn) -> None:
+    rows = conn.execute("SELECT id, status FROM students").fetchall()
+    for row in rows:
+        student_id = int(row["id"])
+        status = str(row["status"] or "").strip() or "調整中"
+        has_error = _student_has_error(conn, student_id)
+        new_status = status
+        if has_error and status != "要調整":
+            new_status = "要調整"
+        elif status == "要調整" and not has_error:
+            new_status = "調整中"
+        if new_status != status:
+            conn.execute(
+                "UPDATE students SET status = ? WHERE id = ?",
+                (new_status, student_id),
+            )
 
 
 def list_conflicts() -> list[dict[str, Any]]:
@@ -935,16 +1042,27 @@ def preview_teachers_sync_from_uploaded_file(filename: str, content: bytes) -> T
     )
 
 
-def _upsert_teacher(conn, name: str, name_kana: str = "") -> int:
-    conn.execute(
-        """
-        INSERT INTO teachers(name, name_kana)
-        VALUES (?, ?)
-        ON CONFLICT(name)
-        DO UPDATE SET name_kana = excluded.name_kana
-        """,
-        (name, name_kana),
-    )
+def _upsert_teacher(conn, name: str, name_kana: str = "", memo: str | None = None) -> int:
+    if memo is None:
+        conn.execute(
+            """
+            INSERT INTO teachers(name, name_kana)
+            VALUES (?, ?)
+            ON CONFLICT(name)
+            DO UPDATE SET name_kana = excluded.name_kana
+            """,
+            (name, name_kana),
+        )
+    else:
+        conn.execute(
+            """
+            INSERT INTO teachers(name, name_kana, memo)
+            VALUES (?, ?, ?)
+            ON CONFLICT(name)
+            DO UPDATE SET name_kana = excluded.name_kana, memo = excluded.memo
+            """,
+            (name, name_kana, memo),
+        )
     row = conn.execute("SELECT id FROM teachers WHERE name = ?", (name,)).fetchone()
     return int(row["id"])
 
@@ -994,6 +1112,14 @@ def _parse_periods(cell: str) -> list[int]:
     return sorted(set(periods))
 
 
+def _find_teacher_note_column(header: list[str]) -> int | None:
+    for idx, col_name in enumerate(header):
+        name = (col_name or "").strip()
+        if "備考" in name:
+            return idx
+    return None
+
+
 def _import_teachers_records(records: list[list[str]]) -> ImportResult:
     if not records:
         raise ValueError("講師データが空です")
@@ -1005,6 +1131,7 @@ def _import_teachers_records(records: list[list[str]]) -> ImportResult:
         parsed = _parse_header_to_date(col_name or "")
         if parsed in DATES:
             date_columns[idx] = parsed
+    note_column = _find_teacher_note_column(header)
 
     if not date_columns:
         raise ValueError("日付列を検出できませんでした")
@@ -1046,7 +1173,10 @@ def _import_teachers_records(records: list[list[str]]) -> ImportResult:
         removed_teachers = len(stale_teacher_ids)
 
     for name, row in latest_by_name.items():
-        teacher_id = _upsert_teacher(conn, name, "")
+        memo = None
+        if note_column is not None:
+            memo = row[note_column] if note_column < len(row) else ""
+        teacher_id = _upsert_teacher(conn, name, "", None if memo is None else (memo or "").strip())
 
         cur.execute("DELETE FROM teacher_subjects WHERE teacher_id = ?", (teacher_id,))
         cur.execute("DELETE FROM teacher_availability WHERE teacher_id = ?", (teacher_id,))
@@ -1074,6 +1204,7 @@ def _import_teachers_records(records: list[list[str]]) -> ImportResult:
         teacher_count += 1
         availability_rows += len(rows_to_insert)
 
+    _apply_auto_student_status_rules(conn)
     conn.commit()
     conn.close()
 
@@ -1243,6 +1374,67 @@ def _validate_student_header(header: list[str]) -> None:
         raise ValueError("日付列（受講可能予定）が見つかりません")
 
 
+def _find_student_note_column(header: list[str]) -> int | None:
+    for idx, col_name in enumerate(header):
+        name = (col_name or "").strip()
+        if "備考" in name:
+            return idx
+    return None
+
+
+def _sync_form_note_for_student(
+    conn,
+    student_id: int,
+    note_text: str,
+) -> None:
+    existing_rows = conn.execute(
+        """
+        SELECT id
+        FROM student_notes
+        WHERE student_id = ?
+          AND body LIKE ?
+        ORDER BY id ASC
+        """,
+        (student_id, f"{FORM_NOTE_PREFIX}%"),
+    ).fetchall()
+
+    now = datetime.now().strftime("%Y-%m-%d %H:%M")
+    body = f"{FORM_NOTE_PREFIX}{note_text.strip()}" if note_text.strip() else ""
+
+    if not body:
+        if existing_rows:
+            conn.executemany(
+                "DELETE FROM student_notes WHERE id = ?",
+                [(row["id"],) for row in existing_rows],
+            )
+        return
+
+    if existing_rows:
+        keep_id = existing_rows[0]["id"]
+        conn.execute(
+            """
+            UPDATE student_notes
+            SET body = ?, updated_at = ?, is_edited = 0, is_deleted = 0, deleted_at = NULL
+            WHERE id = ?
+            """,
+            (body, now, keep_id),
+        )
+        if len(existing_rows) > 1:
+            conn.executemany(
+                "DELETE FROM student_notes WHERE id = ?",
+                [(row["id"],) for row in existing_rows[1:]],
+            )
+        return
+
+    conn.execute(
+        """
+        INSERT INTO student_notes(student_id, body, created_at, updated_at, is_edited, is_deleted, deleted_at)
+        VALUES (?, ?, ?, ?, 0, 0, NULL)
+        """,
+        (student_id, body, now, now),
+    )
+
+
 def _detect_schedule_kind(records: list[list[str]]) -> str:
     if not records:
         raise ValueError("データが空です")
@@ -1283,6 +1475,7 @@ def _import_students_records(records: list[list[str]]) -> ImportResult:
         parsed = _parse_header_to_date(col_name or "")
         if parsed in DATES:
             date_columns[idx] = parsed
+    note_column = _find_student_note_column(header)
 
     latest_by_name: "OrderedDict[str, list[str]]" = OrderedDict()
     for row in records[1:]:
@@ -1341,6 +1534,8 @@ def _import_students_records(records: list[list[str]]) -> ImportResult:
             cell = row[col_idx] if col_idx < len(row) else ""
             for period in _parse_periods(cell or ""):
                 rows_to_insert.append((student_id, date, period))
+        note_text = row[note_column] if note_column is not None and note_column < len(row) else ""
+        _sync_form_note_for_student(conn, student_id, note_text or "")
         cur.executemany(
             "INSERT INTO student_availability(student_id, date, period) VALUES (?, ?, ?)",
             rows_to_insert,
@@ -1348,6 +1543,7 @@ def _import_students_records(records: list[list[str]]) -> ImportResult:
         student_count += 1
         availability_rows += len(rows_to_insert)
 
+    _apply_auto_student_status_rules(conn)
     conn.commit()
     conn.close()
     return ImportResult(
@@ -1421,6 +1617,7 @@ def import_students(data_dir: Path) -> ImportResult:
         student_count += 1
         availability_rows += len(rows_to_insert)
 
+    _apply_auto_student_status_rules(conn)
     conn.commit()
     conn.close()
 

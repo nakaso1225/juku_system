@@ -8,6 +8,7 @@
   </head>
   <body>
     <main class="container">
+      <!-- ====== 第1層: 常時表示 — 生徒・科目選択 ====== -->
       <header class="toolbar">
         <div class="row">
           <label for="student-combo">生徒選択:</label>
@@ -30,16 +31,34 @@
 
           <label for="subject-select">科目選択:</label>
           <select id="subject-select"></select>
+
+          <button id="copy-paste-btn" type="button" class="btn-secondary">コピペ用をコピー</button>
         </div>
-        <div class="row actions">
-          <input id="schedule-file-input" type="file" accept=".csv,.xlsx,.xlsm" />
-          <button id="sync-upload-btn" type="button">予定表ファイルを取り込む</button>
-          <button id="reset-assignments-btn" type="button" class="danger">今の登録をリセット</button>
-        </div>
-        <div class="student-meta-wrap">
-          <section class="student-meta-panel">
+        <div id="subject-counts" class="counts"></div>
+        <div id="flash-message" class="flash hidden"></div>
+      </header>
+
+      <!-- ====== コンテキストバー（生徒＋科目の確認帯） ====== -->
+      <div id="context-bar" class="context-bar">
+        <span id="context-student" class="context-student"></span>
+        <span class="context-sep">|</span>
+        <span id="context-subject" class="context-subject"></span>
+      </div>
+
+      <!-- ====== 講師パレット（この生徒×この科目で過去に使った講師） ====== -->
+      <section id="teacher-palette-section" class="palette-section hidden">
+        <div class="palette-label">登録済み講師（ドラッグして配置）</div>
+        <div id="teacher-palette" class="palette-chips"></div>
+      </section>
+
+      <!-- ====== 第2層: 折りたたみ — 事務メモ ====== -->
+      <section class="collapsible-section">
+        <button id="memo-section-toggle" class="collapsible-toggle" type="button">
+          <span class="toggle-icon">▶</span> 事務メモ
+        </button>
+        <div id="memo-section-body" class="collapsible-body hidden">
+          <div class="student-meta-panel">
             <div class="student-meta-head">
-              <strong>事務メモ</strong>
               <div class="student-meta-head-right">
                 <button id="student-note-trash-toggle-btn" type="button" class="student-note-trash-toggle-btn">
                   ゴミ箱を表示
@@ -64,18 +83,38 @@
             <div class="row student-meta-actions">
               <button id="student-note-send-btn" type="button">送信</button>
             </div>
-          </section>
+          </div>
         </div>
-        <div id="subject-counts" class="counts"></div>
-        <div id="flash-message" class="flash hidden"></div>
-      </header>
+      </section>
 
+      <!-- ====== 第3層: 折りたたみ — 管理ツール ====== -->
+      <section class="collapsible-section">
+        <button id="admin-section-toggle" class="collapsible-toggle" type="button">
+          <span class="toggle-icon">▶</span> 管理ツール
+        </button>
+        <div id="admin-section-body" class="collapsible-body hidden">
+          <div class="admin-tools-inner">
+            <div class="row admin-tools-row">
+              <input id="schedule-file-input" type="file" accept=".csv,.xlsx,.xlsm" />
+              <button id="sync-upload-btn" type="button">予定表ファイルを取り込む</button>
+            </div>
+            <div class="row admin-tools-row">
+              <button id="reset-assignments-btn" type="button" class="danger">今の登録をリセット</button>
+            </div>
+            <div id="access-info" class="access-info hidden"></div>
+          </div>
+        </div>
+      </section>
+
+      <!-- ====== コンフリクトバー ====== -->
       <section id="conflict-bar" class="conflict-bar hidden"></section>
 
+      <!-- ====== メイングリッド（時間割） ====== -->
       <section class="grid-wrap">
         <table id="timetable"></table>
       </section>
 
+      <!-- ====== 講師カレンダー ====== -->
       <section class="teacher-panel">
         <button id="teacher-panel-toggle" class="teacher-panel-toggle" type="button">講師カレンダーを表示</button>
         <div id="teacher-panel-body" class="teacher-panel-body hidden">
@@ -88,6 +127,7 @@
                   class="teacher-search"
                   type="text"
                   placeholder="講師名を入力して選択"
+                  autocomplete="off"
                 />
                 <button id="teacher-clear-btn" class="clear-btn" type="button" aria-label="検索文字を消す">
                   ×
@@ -97,6 +137,7 @@
             </div>
           </div>
           <div id="teacher-subjects" class="teacher-subjects"></div>
+          <div id="teacher-note" class="teacher-note hidden"></div>
           <div class="teacher-grid-wrap">
             <table id="teacher-timetable"></table>
           </div>
@@ -104,6 +145,7 @@
       </section>
     </main>
 
+    <!-- ====== モーダル（講師選択） ====== -->
     <div id="teacher-modal" class="modal hidden">
       <div class="modal-content">
         <div class="modal-header">
@@ -119,6 +161,7 @@
       </div>
     </div>
 
+    <!-- ====== 確認モーダル ====== -->
     <div id="confirm-modal" class="modal hidden">
       <div class="modal-content">
         <div class="modal-title">確認</div>
@@ -131,5 +174,21 @@
     </div>
 
     <script src="{{ url_for('static', filename='app.js') }}"></script>
+    <script>
+      // 折りたたみセクションのトグル
+      document.querySelectorAll('.collapsible-toggle').forEach(function(btn) {
+        btn.addEventListener('click', function() {
+          var body = btn.nextElementSibling;
+          var icon = btn.querySelector('.toggle-icon');
+          if (body.classList.contains('hidden')) {
+            body.classList.remove('hidden');
+            icon.textContent = '▼';
+          } else {
+            body.classList.add('hidden');
+            icon.textContent = '▶';
+          }
+        });
+      });
+    </script>
   </body>
 </html>

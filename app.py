@@ -1,14 +1,18 @@
 from __future__ import annotations
 
+import json
 from pathlib import Path
 import os
+from queue import Empty, Full, Queue
 import signal
+import socket
 import webbrowser
 import time
 from threading import Timer
 from threading import Lock
 
 from flask import Flask, jsonify, render_template, request
+from flask_sock import Sock
 
 from database import (
     DATES,
@@ -48,10 +52,14 @@ from models import (
 BASE_DIR = Path(__file__).resolve().parent
 
 app = Flask(__name__)
+sock = Sock(app)
 
 ACTIVE_TABS: dict[str, float] = {}
 ACTIVE_TABS_LOCK = Lock()
 TAB_TTL_SECONDS = 30.0
+WS_CLIENTS: set[Queue[str]] = set()
+WS_CLIENTS_LOCK = Lock()
+WS_QUEUE_MAXSIZE = 64
 
 
 def _prune_active_tabs(now: float) -> None:
@@ -86,24 +94,43 @@ def _schedule_shutdown_if_no_tabs(delay_seconds: float = 1.5) -> None:
     Timer(delay_seconds, _check_and_terminate).start()
 
 
+def _request_tab_id() -> str | None:
+    tab_id = str(request.headers.get("X-Tab-Id") or "").strip()
+    return tab_id or None
+
+
+def _broadcast_schedule_event(
+    *,
+    scope: str,
+    student_id: int | None = None,
+    reason: str,
+    source_tab_id: str | None = None,
+) -> None:
+    payload = json.dumps(
+        {
+            "type": "schedule_updated",
+            "scope": scope,
+            "student_id": student_id,
+            "reason": reason,
+            "source_tab_id": source_tab_id,
+            "sent_at": time.time(),
+        },
+        ensure_ascii=False,
+    )
+
+    with WS_CLIENTS_LOCK:
+        stale_clients: list[Queue[str]] = []
+        for client_queue in WS_CLIENTS:
+            try:
+                client_queue.put_nowait(payload)
+            except Full:
+                stale_clients.append(client_queue)
+        for client_queue in stale_clients:
+            WS_CLIENTS.discard(client_queue)
+
+
 def bootstrap_data() -> None:
     init_db()
-
-    teacher_count = 0
-    student_count = 0
-    conn = get_connection()
-    try:
-        teacher_count = conn.execute("SELECT COUNT(*) FROM teachers").fetchone()[0]
-        student_count = conn.execute("SELECT COUNT(*) FROM students").fetchone()[0]
-    finally:
-        conn.close()
-
-    # Prefer spreadsheet/csv teachers over hardcoded sample data.
-    # This keeps teacher data aligned with source files during debugging.
-    try:
-        import_teachers(BASE_DIR / "data")
-    except Exception:
-        pass
 
     conn = get_connection()
     try:
@@ -125,6 +152,38 @@ def bootstrap_data() -> None:
 bootstrap_data()
 
 
+def _detect_lan_ip() -> str | None:
+    sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    try:
+        sock.connect(("8.8.8.8", 80))
+        ip = sock.getsockname()[0]
+        if ip and not ip.startswith("127."):
+            return ip
+    except OSError:
+        return None
+    finally:
+        sock.close()
+    return None
+
+
+@sock.route("/ws")
+def ws_updates(ws):
+    client_queue: Queue[str] = Queue(maxsize=WS_QUEUE_MAXSIZE)
+    with WS_CLIENTS_LOCK:
+        WS_CLIENTS.add(client_queue)
+
+    try:
+        while True:
+            try:
+                message = client_queue.get(timeout=15.0)
+            except Empty:
+                message = json.dumps({"type": "ping"})
+            ws.send(message)
+    finally:
+        with WS_CLIENTS_LOCK:
+            WS_CLIENTS.discard(client_queue)
+
+
 @app.route("/")
 def index():
     return render_template("index.html")
@@ -132,6 +191,8 @@ def index():
 
 @app.route("/api/meta")
 def api_meta():
+    port = int(os.environ.get("APP_PORT", "5000"))
+    lan_ip = _detect_lan_ip()
     return jsonify(
         {
             "subjects": SUBJECTS,
@@ -139,6 +200,8 @@ def api_meta():
             "period_labels": PERIOD_LABELS,
             "dates": DATES,
             "table_ids": TABLE_IDS,
+            "lan_ip": lan_ip,
+            "lan_url": f"http://{lan_ip}:{port}" if lan_ip else None,
         }
     )
 
@@ -353,20 +416,44 @@ def api_create_assignment():
     except Exception as exc:
         return jsonify({"error": str(exc)}), 400
 
+    _broadcast_schedule_event(
+        scope="student",
+        student_id=int(payload["student_id"]),
+        reason="assignment_saved",
+        source_tab_id=_request_tab_id(),
+    )
     return jsonify(result), 201
 
 
 @app.route("/api/assignments/<int:assignment_id>", methods=["DELETE"])
 def api_delete_assignment(assignment_id: int):
+    conn = get_connection()
+    row = conn.execute(
+        "SELECT student_id FROM assignments WHERE id = ?",
+        (assignment_id,),
+    ).fetchone()
+    conn.close()
+
     deleted = delete_assignment(assignment_id)
     if not deleted:
         return jsonify({"error": "assignment not found"}), 404
+    _broadcast_schedule_event(
+        scope="student",
+        student_id=None if row is None else int(row["student_id"]),
+        reason="assignment_deleted",
+        source_tab_id=_request_tab_id(),
+    )
     return ("", 204)
 
 
 @app.route("/api/assignments/reset", methods=["POST"])
 def api_reset_assignments():
     deleted_count = reset_assignments()
+    _broadcast_schedule_event(
+        scope="global",
+        reason="assignments_reset",
+        source_tab_id=_request_tab_id(),
+    )
     return jsonify({"deleted_assignments": deleted_count})
 
 
@@ -382,6 +469,11 @@ def api_sync_schedule():
     except Exception as exc:
         return jsonify({"error": str(exc)}), 400
 
+    _broadcast_schedule_event(
+        scope="global",
+        reason="teacher_schedule_synced",
+        source_tab_id=_request_tab_id(),
+    )
     return jsonify(
         {
             "imported_teachers": result.teachers,
@@ -424,6 +516,11 @@ def api_sync_schedule_upload():
     except Exception as exc:
         return jsonify({"error": str(exc)}), 400
 
+    _broadcast_schedule_event(
+        scope="global",
+        reason="teacher_schedule_uploaded",
+        source_tab_id=_request_tab_id(),
+    )
     return jsonify(
         {
             "imported_teachers": result.teachers,
@@ -466,6 +563,11 @@ def api_sync_students_upload_apply():
     except Exception as exc:
         return jsonify({"error": str(exc)}), 400
 
+    _broadcast_schedule_event(
+        scope="global",
+        reason="student_schedule_uploaded",
+        source_tab_id=_request_tab_id(),
+    )
     return jsonify(
         {
             "imported_students": result.students,
@@ -509,6 +611,11 @@ def api_sync_upload_apply():
     except Exception as exc:
         return jsonify({"error": str(exc)}), 400
 
+    _broadcast_schedule_event(
+        scope="global",
+        reason=f"{kind}_schedule_uploaded",
+        source_tab_id=_request_tab_id(),
+    )
     if kind == "teacher":
         return jsonify(
             {
@@ -583,8 +690,11 @@ def api_shutdown():
 
 
 if __name__ == "__main__":
+    host = os.environ.get("APP_HOST", "0.0.0.0")
+    port = int(os.environ.get("APP_PORT", "5000"))
+
     # デバッグ時のリローダーで二重起動しないよう、実行プロセス側でのみ開く
     if os.environ.get("WERKZEUG_RUN_MAIN") == "true":
-        Timer(1.0, lambda: webbrowser.open("http://127.0.0.1:5000/")).start()
+        Timer(1.0, lambda: webbrowser.open(f"http://127.0.0.1:{port}/")).start()
 
-    app.run(debug=True)
+    app.run(host=host, port=port, debug=True)
