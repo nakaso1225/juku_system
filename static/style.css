@@ -1059,6 +1059,9 @@ button {
 .teacher-cell {
   min-height: 40px;
   background: #fff;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
 }
 
 .teacher-cell.assigned {
@@ -1080,6 +1083,11 @@ button {
   padding: 2px 8px;
   cursor: pointer;
   border-left-width: 5px;
+  display: inline-block;
+  max-width: 110px;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
 }
 
 .teacher-cell-student:hover {
@@ -1104,7 +1112,7 @@ button {
   background: rgba(0, 0, 0, 0.28);
   display: grid;
   place-items: center;
-  z-index: 5000; /* Ensure modal appears above sticky headers and week tables */
+  z-index: 5000; 
 }
 
 .modal-content {
@@ -1206,6 +1214,7 @@ button {
   border-collapse: collapse;
   width: 100%;
   min-width: 600px;
+  table-layout: fixed;
 }
 
 .empty-day {
