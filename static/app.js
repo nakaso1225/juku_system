@@ -11,6 +11,8 @@ const state = {
   conflicts: [],
   slotSummary: [],
   selectedSlot: null,
+  weeks: [],
+  currentWeekIndex: 0,
 };
 
 let flashTimer = null;
@@ -109,11 +111,56 @@ function colorForStudentRef(ref) {
   };
 }
 
+function groupDatesByWeek(dates) {
+  if (!dates || dates.length === 0) return [];
+  const weeks = [];
+  
+  // 最初の日付の曜日を取得
+  const firstDate = dates[0];
+  const [y, m, d] = firstDate.split("-").map(Number);
+  const firstDayOfWeek = new Date(y, m - 1, d).getDay();
+  
+  // 最初の週の前の空白を埋める
+  let currentWeek = new Array(firstDayOfWeek).fill(null);
+  let dateIndex = 0;
+  
+  while (dateIndex < dates.length) {
+    currentWeek.push(dates[dateIndex]);
+    dateIndex++;
+    
+    if (currentWeek.length === 7) {
+      weeks.push(currentWeek);
+      currentWeek = [];
+    }
+  }
+  
+  // 最後の週が不完全な場合、終わりまで埋める
+  if (currentWeek.length > 0) {
+    while (currentWeek.length < 7) {
+      currentWeek.push(null);
+    }
+    weeks.push(currentWeek);
+  }
+
+  return weeks;
+}
+
 function formatDate(isoDate) {
+  if (!isoDate) return "";
   const [y, m, day] = isoDate.split("-").map(Number);
   const d = new Date(y, m - 1, day);
   const week = ["日", "月", "火", "水", "木", "金", "土"][d.getDay()];
   return `${d.getMonth() + 1}/${d.getDate()}(${week})`;
+}
+
+function buildWeekHeader(weekDates) {
+  const validDates = weekDates.filter(d => d !== null);
+  if (validDates.length === 0) return "";
+  const startDate = validDates[0];
+  const endDate = validDates[validDates.length - 1];
+  const [sy, sm, sd] = startDate.split("-").map(Number);
+  const [ey, em, ed] = endDate.split("-").map(Number);
+  return `${sm}/${sd} - ${em}/${ed}`;
 }
 
 function renderAccessInfo() {
@@ -1506,49 +1553,56 @@ async function jumpToStudentFromTeacherPanel(studentName) {
   }
 }
 
-function renderGrid() {
-  const table = document.getElementById("timetable");
-  const dates = state.meta.dates;
-  const periods = state.meta.periods;
+function buildAndAppendWeekTable(container, weekDates, periods, availabilitySet, assignmentMap, slotSummaryMap) {
+  // Create week wrapper
+  const weekWrapper = document.createElement("div");
+  weekWrapper.className = "week-table-wrapper";
 
-  const availabilitySet = new Set(
-    state.timetable.availability.map((s) => `${s.date}#${s.period}`)
-  );
+  // Week label
+  const weekLabel = document.createElement("div");
+  weekLabel.className = "week-label";
+  weekLabel.textContent = buildWeekHeader(weekDates);
+  weekWrapper.appendChild(weekLabel);
 
-  const assignmentMap = new Map();
-  for (const a of state.timetable.assignments) {
-    assignmentMap.set(`${a.date}#${a.period}`, a);
-  }
-  const slotSummaryMap = new Map();
-  for (const s of state.slotSummary || []) {
-    slotSummaryMap.set(`${s.date}#${s.period}`, {
-      free: Number(s.free_teacher_count || 0),
-      total: Number(s.total_teacher_count || 0),
-    });
-  }
+  // Week table
+  const table = document.createElement("table");
+  table.className = "week-timetable";
 
-  table.innerHTML = "";
+  // Header row with dates
+  const headerRow = document.createElement("tr");
+  const cornerHeader = document.createElement("th");
+  cornerHeader.className = "sticky-corner";
+  cornerHeader.textContent = "時限";
+  headerRow.appendChild(cornerHeader);
 
-  const headTr = document.createElement("tr");
-  const topLeft = document.createElement("th");
-  topLeft.textContent = "時限";
-  headTr.appendChild(topLeft);
-  for (const date of dates) {
+  for (const date of weekDates) {
     const th = document.createElement("th");
+    th.className = "date-header";
     th.textContent = formatDate(date);
-    headTr.appendChild(th);
+    headerRow.appendChild(th);
   }
-  table.appendChild(headTr);
+  table.appendChild(headerRow);
 
+  // Period rows
   for (const period of periods) {
     const tr = document.createElement("tr");
     const label = document.createElement("th");
+    label.className = "period-header sticky-corner";
     label.textContent = state.meta.period_labels[String(period)] || `${period}限`;
     tr.appendChild(label);
 
-    for (const date of dates) {
+    for (const date of weekDates) {
       const td = document.createElement("td");
       td.className = "cell";
+
+      // nullの場合は空欄
+      if (date === null) {
+        td.classList.add("empty-day");
+        td.textContent = "";
+        tr.appendChild(td);
+        continue;
+      }
+
       td.dataset.date = date;
       td.dataset.period = String(period);
       const key = `${date}#${period}`;
@@ -1636,6 +1690,83 @@ function renderGrid() {
     }
 
     table.appendChild(tr);
+  }
+
+  weekWrapper.appendChild(table);
+  container.appendChild(weekWrapper);
+}
+
+function renderGrid() {
+  const container = document.getElementById("timetable");
+  const dates = state.meta.dates;
+  const periods = state.meta.periods;
+
+  const availabilitySet = new Set(
+    state.timetable.availability.map((s) => `${s.date}#${s.period}`)
+  );
+
+  const assignmentMap = new Map();
+  for (const a of state.timetable.assignments) {
+    assignmentMap.set(`${a.date}#${a.period}`, a);
+  }
+  const slotSummaryMap = new Map();
+  for (const s of state.slotSummary || []) {
+    slotSummaryMap.set(`${s.date}#${s.period}`, {
+      free: Number(s.free_teacher_count || 0),
+      total: Number(s.total_teacher_count || 0),
+    });
+  }
+
+  // グループ化と状態を保存
+  state.weeks = groupDatesByWeek(dates);
+  if (state.currentWeekIndex >= state.weeks.length) {
+    state.currentWeekIndex = 0;
+  }
+
+  container.innerHTML = "";
+  
+  // ナビゲーションボタンを追加
+  const navBar = document.createElement("div");
+  navBar.className = "week-nav-bar";
+  navBar.style.marginBottom = "10px";
+  navBar.style.display = "flex";
+  navBar.style.gap = "10px";
+  navBar.style.alignItems = "center";
+
+  const prevBtn = document.createElement("button");
+  prevBtn.className = "btn-secondary";
+  prevBtn.textContent = "< 前の週";
+  prevBtn.addEventListener("click", () => {
+    if (state.currentWeekIndex > 0) {
+      state.currentWeekIndex--;
+      renderGrid();
+    }
+  });
+
+  const nextBtn = document.createElement("button");
+  nextBtn.className = "btn-secondary";
+  nextBtn.textContent = "次の週 >";
+  nextBtn.addEventListener("click", () => {
+    if (state.currentWeekIndex < state.weeks.length - 1) {
+      state.currentWeekIndex++;
+      renderGrid();
+    }
+  });
+
+  const weekInfo = document.createElement("span");
+  weekInfo.style.fontSize = "14px";
+  weekInfo.style.color = "var(--muted)";
+  weekInfo.textContent = `第 ${state.currentWeekIndex + 1} 週`;
+
+  navBar.appendChild(prevBtn);
+  navBar.appendChild(weekInfo);
+  navBar.appendChild(nextBtn);
+  container.appendChild(navBar);
+
+  // 現在の週だけをレンダリング
+  if (state.weeks.length > 0) {
+    const currentWeek = state.weeks[state.currentWeekIndex];
+    buildAndAppendWeekTable(container, currentWeek, periods, availabilitySet, assignmentMap, slotSummaryMap);
   }
 }
 
@@ -1775,10 +1906,18 @@ async function selectTeacherFromDropdown(teacher) {
   renderTeacherPanel();
 }
 
-function renderTeacherGrid() {
-  const table = document.getElementById("teacher-timetable");
-  if (!table || !state.meta) return;
-  const panel = state.teacherPanel || { assignments: [], availability: [] };
+function buildAndAppendTeacherWeekTable(container, weekDates, periods, panel) {
+  // Create week wrapper
+  const weekWrapper = document.createElement("div");
+  weekWrapper.className = "week-table-wrapper";
+
+  // Week label
+  const weekLabel = document.createElement("div");
+  weekLabel.className = "week-label";
+  weekLabel.textContent = buildWeekHeader(weekDates);
+  weekWrapper.appendChild(weekLabel);
+
+  // Build availability and assignment maps
   const availabilitySet = new Set((panel.availability || []).map((a) => `${a.date}#${a.period}`));
   const assignmentMap = new Map();
   const conflictSlotSet = new Set();
@@ -1792,27 +1931,45 @@ function renderTeacherGrid() {
     if (a.has_conflict) conflictSlotSet.add(key);
   }
 
-  table.innerHTML = "";
-  const headTr = document.createElement("tr");
-  const topLeft = document.createElement("th");
-  topLeft.textContent = "時限";
-  headTr.appendChild(topLeft);
-  for (const date of state.meta.dates) {
-    const th = document.createElement("th");
-    th.textContent = formatDate(date);
-    headTr.appendChild(th);
-  }
-  table.appendChild(headTr);
+  // Week table
+  const table = document.createElement("table");
+  table.className = "week-timetable";
 
-  for (const period of state.meta.periods) {
+  // Header row with dates
+  const headerRow = document.createElement("tr");
+  const cornerHeader = document.createElement("th");
+  cornerHeader.className = "sticky-corner";
+  cornerHeader.textContent = "時限";
+  headerRow.appendChild(cornerHeader);
+
+  for (const date of weekDates) {
+    const th = document.createElement("th");
+    th.className = "date-header";
+    th.textContent = formatDate(date);
+    headerRow.appendChild(th);
+  }
+  table.appendChild(headerRow);
+
+  // Period rows
+  for (const period of periods) {
     const tr = document.createElement("tr");
     const label = document.createElement("th");
+    label.className = "period-header sticky-corner";
     label.textContent = state.meta.period_labels[String(period)] || `${period}限`;
     tr.appendChild(label);
 
-    for (const date of state.meta.dates) {
+    for (const date of weekDates) {
       const td = document.createElement("td");
       td.className = "teacher-cell";
+
+      // nullの場合は空欄
+      if (date === null) {
+        td.classList.add("empty-day");
+        td.textContent = "";
+        tr.appendChild(td);
+        continue;
+      }
+
       const key = `${date}#${period}`;
       const entries = assignmentMap.get(key) || [];
       const available = availabilitySet.has(key);
@@ -1855,6 +2012,67 @@ function renderTeacherGrid() {
       tr.appendChild(td);
     }
     table.appendChild(tr);
+  }
+
+  weekWrapper.appendChild(table);
+  container.appendChild(weekWrapper);
+}
+
+function renderTeacherGrid() {
+  const container = document.getElementById("teacher-timetable");
+  if (!container || !state.meta) return;
+  const panel = state.teacherPanel || { assignments: [], availability: [] };
+  const periods = state.meta.periods;
+  const dates = state.meta.dates;
+
+  container.innerHTML = "";
+  
+  // ナビゲーションボタンを追加（同じweeks状態を使用）
+  if (!state.weeks || state.weeks.length === 0) {
+    state.weeks = groupDatesByWeek(dates);
+  }
+  
+  const navBar = document.createElement("div");
+  navBar.className = "week-nav-bar";
+  navBar.style.marginBottom = "10px";
+  navBar.style.display = "flex";
+  navBar.style.gap = "10px";
+  navBar.style.alignItems = "center";
+
+  const prevBtn = document.createElement("button");
+  prevBtn.className = "btn-secondary";
+  prevBtn.textContent = "< 前の週";
+  prevBtn.addEventListener("click", () => {
+    if (state.currentWeekIndex > 0) {
+      state.currentWeekIndex--;
+      renderTeacherGrid();
+    }
+  });
+
+  const nextBtn = document.createElement("button");
+  nextBtn.className = "btn-secondary";
+  nextBtn.textContent = "次の週 >";
+  nextBtn.addEventListener("click", () => {
+    if (state.currentWeekIndex < state.weeks.length - 1) {
+      state.currentWeekIndex++;
+      renderTeacherGrid();
+    }
+  });
+
+  const weekInfo = document.createElement("span");
+  weekInfo.style.fontSize = "14px";
+  weekInfo.style.color = "var(--muted)";
+  weekInfo.textContent = `第 ${state.currentWeekIndex + 1} 週`;
+
+  navBar.appendChild(prevBtn);
+  navBar.appendChild(weekInfo);
+  navBar.appendChild(nextBtn);
+  container.appendChild(navBar);
+
+  // 現在の週だけをレンダリング
+  if (state.weeks.length > 0) {
+    const currentWeek = state.weeks[state.currentWeekIndex];
+    buildAndAppendTeacherWeekTable(container, currentWeek, periods, panel);
   }
 }
 

@@ -1007,7 +1007,7 @@ def preview_teachers_sync_from_uploaded_file(filename: str, content: bytes) -> T
     date_columns = {
         idx: _parse_header_to_date(col_name or "")
         for idx, col_name in enumerate(header)
-        if _parse_header_to_date(col_name or "") in DATES
+        if _parse_header_to_date(col_name or "")
     }
     if not date_columns:
         raise ValueError("日付列を検出できませんでした")
@@ -1068,12 +1068,21 @@ def _upsert_teacher(conn, name: str, name_kana: str = "", memo: str | None = Non
 
 
 def _parse_header_to_date(header: str) -> str | None:
-    m = re.search(r"\[(\d{1,2})/(\d{1,2})(?:（[^）]*）)?\]", header)
-    if not m:
-        return None
-    month = int(m.group(1))
-    day = int(m.group(2))
-    return f"2026-{month:02d}-{day:02d}"
+    text = (header or "").strip()
+    patterns = (
+        r"(?P<year>\d{4})[-/](?P<month>\d{1,2})[-/](?P<day>\d{1,2})",
+        r"(?P<month>\d{1,2})/(?P<day>\d{1,2})",
+        r"(?P<month>\d{1,2})月(?P<day>\d{1,2})日",
+    )
+    for pattern in patterns:
+        match = re.search(pattern, text)
+        if not match:
+            continue
+        year = int(match.group("year")) if "year" in match.groupdict() and match.group("year") else datetime.now().year
+        month = int(match.group("month"))
+        day = int(match.group("day"))
+        return f"{year:04d}-{month:02d}-{day:02d}"
+    return None
 
 
 def _validate_teacher_header(header: list[str]) -> None:
@@ -1129,7 +1138,7 @@ def _import_teachers_records(records: list[list[str]]) -> ImportResult:
     date_columns: dict[int, str] = {}
     for idx, col_name in enumerate(header):
         parsed = _parse_header_to_date(col_name or "")
-        if parsed in DATES:
+        if parsed:
             date_columns[idx] = parsed
     note_column = _find_teacher_note_column(header)
 
@@ -1473,7 +1482,7 @@ def _import_students_records(records: list[list[str]]) -> ImportResult:
     date_columns: dict[int, str] = {}
     for idx, col_name in enumerate(header):
         parsed = _parse_header_to_date(col_name or "")
-        if parsed in DATES:
+        if parsed:
             date_columns[idx] = parsed
     note_column = _find_student_note_column(header)
 
@@ -1625,29 +1634,19 @@ def import_students(data_dir: Path) -> ImportResult:
 
 
 def _extract_date_columns_from_sheet(ws) -> dict[int, str]:
-    # row 6 expected to have date labels like 3/26 or 26.
+    # row 6 expected to have date labels like 2026-03-26, 3/26, or 3月26日.
     row = 6
     cols: dict[int, str] = {}
-    known = {(int(d[5:7]), int(d[8:10])): d for d in DATES}
-
-    current_month = 3
     for col in range(1, ws.max_column + 1):
         raw = ws.cell(row=row, column=col).value
         if raw is None:
             continue
         text = str(raw).strip()
-        m = re.match(r"^(\d{1,2})\/(\d{1,2})$", text)
-        if m:
-            current_month = int(m.group(1))
-            day = int(m.group(2))
-        elif text.isdigit():
-            day = int(text)
-        else:
+        date = _parse_header_to_date(text)
+        if not date:
             continue
 
-        date = known.get((current_month, day))
-        if date:
-            cols[col] = date
+        cols[col] = date
 
     return cols
 

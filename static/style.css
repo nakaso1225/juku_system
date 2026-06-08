@@ -648,6 +648,8 @@ button {
   border-collapse: collapse;
   min-width: 950px;
   table-layout: fixed;
+  --month-header-height: 36px;
+  --date-header-height: 42px;
 }
 
 #timetable th,
@@ -666,10 +668,53 @@ button {
   font-weight: 600;
 }
 
+#timetable .month-header-row th,
+#teacher-timetable .month-header-row th {
+  position: sticky;
+  top: 0;
+  z-index: 4;
+  height: var(--month-header-height);
+  background: linear-gradient(#edf5f1, #e4efe9);
+  font-size: 12px;
+  letter-spacing: 0.02em;
+}
+
+#timetable .date-header-row th,
+#teacher-timetable .date-header-row th {
+  position: sticky;
+  top: var(--month-header-height);
+  z-index: 3;
+  height: var(--date-header-height);
+  background: #f6f8f7;
+}
+
+#timetable .sticky-corner,
+#teacher-timetable .sticky-corner {
+  left: 0;
+  z-index: 5;
+  position: sticky;
+  background: linear-gradient(#edf5f1, #e4efe9);
+}
+
+#timetable .period-header,
+#teacher-timetable .period-header {
+  position: sticky;
+  left: 0;
+  z-index: 2;
+  background: #f0f4f2;
+  min-width: 82px;
+}
+
+#timetable .month-header,
+#teacher-timetable .month-header {
+  min-width: 90px;
+}
+
 #teacher-timetable {
   width: 100%;
   border-collapse: collapse;
   min-width: 950px;
+  table-layout: fixed;
 }
 
 /* ===================================================================
@@ -679,6 +724,13 @@ button {
   min-height: 48px;
   cursor: default;
   background: #ffffff;
+}
+
+.month-header-row th,
+.date-header-row th,
+.period-header,
+.sticky-corner {
+  box-shadow: 0 1px 0 rgba(0, 0, 0, 0.04);
 }
 
 .cell.unavailable {
@@ -794,6 +846,7 @@ button {
   min-width: 0;
   grid-column: 1;
   display: -webkit-box;
+  line-clamp: 2;
   -webkit-line-clamp: 2;
   -webkit-box-orient: vertical;
   overflow: hidden;
@@ -1095,4 +1148,43 @@ button {
     padding: 6px;
     font-size: 12px;
   }
+
+  #timetable {
+    --month-header-height: 34px;
+    --date-header-height: 38px;
+  }
+}
+
+/* ===================================================================
+   週ごとのテーブルラッパー・ラベル
+   =================================================================== */
+.week-table-wrapper {
+  display: flex;
+  flex-direction: column;
+  margin-bottom: 16px;
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  overflow-x: auto;
+}
+
+.week-label {
+  font-weight: 600;
+  padding: 10px 12px;
+  background: #f0f4f2;
+  border-bottom: 1px solid var(--line);
+  border-radius: 8px 8px 0 0;
+  font-size: 14px;
+  color: var(--text);
+}
+
+.week-timetable {
+  border-collapse: collapse;
+  width: 100%;
+  min-width: 600px;
+}
+
+.empty-day {
+  background-color: #f9f9f9;
+  opacity: 0.5;
 }

@@ -1,0 +1,14 @@
+{
+  "coma_id": 12345,
+  "date": "2026-03-26",
+  "classroom": "A",
+  "teacher_id": 10001,
+  "max_seats": 1,
+  "is_public": true,
+  "students": [
+    {
+      "student_id": 20001,
+      "subject": "数学Ⅰ・A"
+    }
+  ]
+}

@@ -1,0 +1,1762 @@
+/**
+ * 複数ファイルにまたがって利用される (可能性がある) 定数を定義しておくファイル。
+ *
+ * gasでは変数・定数のスコープ (参照できる範囲) がファイルで区切られていないので、
+ * 何もしなくても (特にimportなどしなくても) このファイルに定義した定数を別ファイルから呼び出せる。
+ */
+const properties = PropertiesService.getScriptProperties();
+// Comiru
+const COMIRU_API_BASE_URL = "https://api.comiru.com";
+const COMIRU_SCHOOL_ID = properties.getProperty("COMIRU_SCHOOL_ID");
+// 授業登録シート名
+const REGISTER_LESSONS_SHEET_NAME = "授業登録";
+// レギュラー授業登録シート名
+const REGISTER_REGULAR_LESSONS_SHEET_NAME = "レギュラー授業登録";
+// 授業削除シート名
+const DELETE_LESSONS_SHEET_NAME = "授業削除";
+// 授業差分検出用シート名
+const DETECT_LESSON_CHANGES_SHEET_NAME = "授業差分検出";
+const RECORD_PRE_CHANGE_LESSONS_SHEET_NAME = "授業情報記録";
+// リストシート名
+const COMA_LIST_SHEET_NAME = "授業コマリスト";
+const SUBJECT_LIST_SHEET_NAME = "科目リスト";
+const TEACHER_LIST_SHEET_NAME = "講師リスト";
+const STUDENT_LIST_SHEET_NAME = "生徒リスト";
+// Date型で利用するためのミリ秒表示
+const ONE_DAY_IN_MILLISECONDS = 1000 * 60 * 60 * 24; // 1日のミリ秒数
+const ONE_MONTH_IN_MILLISECONDS = ONE_DAY_IN_MILLISECONDS * 31; // 31日のミリ秒数
+// 曜日一覧 (jsのDate Objectは日曜日始まり)
+const DAY_OF_WEEK_LIST = ["日", "月", "火", "水", "木", "金", "土"];
+function detectLessonChanges() {
+  const sheet = SpreadsheetApp.getActiveSpreadsheet().getSheetByName(
+    DETECT_LESSON_CHANGES_SHEET_NAME
+  );
+  // 「授業情報記録」シートからデータを読み出す
+  const { preChangeLessons, fetchLessonStartDate } = inputPreChangeLessons();
+  // idをkeyとした授業Mapを作成
+  const preChangeLessonsIdMap = createLessonIdMap(preChangeLessons);
+  // シートに授業の取得開始日が書かれていない場合は、前月初日を設定する
+  const today = new Date();
+  const firstDayOfLastMonth = new Date(
+    today.getFullYear(),
+    today.getMonth() - 1,
+    1
+  );
+  // 新しく授業情報をfetchする
+  const postChangeLessons = fetchAllLessonsAfter(
+    fetchLessonStartDate || firstDayOfLastMonth
+  ); // 定義はrecordPreChangeLessons.gs
+  // idで検索して「更新」「新規作成」「削除」の授業を見つける
+  const { updatedLessons, createdLessons, deletedLessons } =
+    categorizeLessonsByChangeType(preChangeLessonsIdMap, postChangeLessons);
+  Logger.log(
+    `更新: ${updatedLessons.length} 件\n新規作成: ${createdLessons.length} 件\n削除: ${deletedLessons.length} 件`
+  );
+  // 生徒名ごとに分けて表示
+  const lessonChangesMap = categorizeLessonsByStudent(
+    updatedLessons,
+    createdLessons,
+    deletedLessons
+  );
+  // 表示用にformat
+  const formattedLessonChanges = formatLessonChanges(lessonChangesMap);
+  Logger.log(
+    `formattedLessonChanges:\n${JSON.stringify(
+      formattedLessonChanges,
+      null,
+      2
+    )}`
+  );
+  // シート内容をリセット
+  const firstRow = 9;
+  const lastRow = sheet.getLastRow();
+  const lastColumn = sheet.getLastColumn();
+  if (lastRow >= firstRow) {
+    sheet
+      .getRange(firstRow, 1, lastRow - firstRow + 1, lastColumn)
+      .clearContent();
+  }
+  // データ表示
+  if (formattedLessonChanges.length > 0) {
+    sheet
+      .getRange(
+        firstRow,
+        2,
+        formattedLessonChanges.length,
+        formattedLessonChanges[0].length
+      )
+      .setValues(formattedLessonChanges);
+  }
+  // 次回用に「授業情報記録」シートの内容を更新
+  updateRecordPreChangeLessonSheetContent(
+    postChangeLessons,
+    firstDayOfLastMonth
+  ); // 定義はrecordPreChangeLessons.gs
+}
+function inputPreChangeLessons() {
+  const sheet = SpreadsheetApp.getActiveSpreadsheet().getSheetByName(
+    RECORD_PRE_CHANGE_LESSONS_SHEET_NAME
+  );
+  const firstRow = 2;
+  const lastRow = sheet.getLastRow();
+  const lastColumn = 8;
+  const preChangeLessons = sheet
+    .getRange(firstRow, 1, lastRow - firstRow + 1, lastColumn)
+    .getDisplayValues();
+  const fetchLessonStartDate = sheet.getRange(5, lastColumn + 2).getValue();
+  Logger.log(`Fetched Lesson Start Date: ${fetchLessonStartDate}`);
+  return { preChangeLessons, fetchLessonStartDate };
+}
+function createLessonIdMap(lessons) {
+  // { [key]: value } 型のデータ構造。lessonIdを指定しての検索などが高速に行える
+  const lessonIdMap = new Map();
+  for (const lesson of lessons) {
+    const lessonId = lesson[0];
+    const lessonDetail = lesson.slice(1).join(",");
+    lessonIdMap.set(lessonId, lessonDetail);
+  }
+  return lessonIdMap;
+}
+function categorizeLessonsByChangeType(
+  preChangeLessonsIdMap,
+  postChangeLessons
+) {
+  const updatedLessons = [];
+  const createdLessons = [];
+  for (const lesson of postChangeLessons) {
+    const lessonId = lesson[0];
+    const lessonDetail = lesson.slice(1).join(",");
+    // preChangeLessonsに存在しないlesson情報の時 (新規作成)
+    if (!preChangeLessonsIdMap.has(lessonId)) {
+      createdLessons.push(lessonDetail);
+      continue;
+    }
+    // preChangeLessonsに存在するlessonIdの情報である場合
+    const preChangeLessonDetail = preChangeLessonsIdMap.get(lessonId);
+    preChangeLessonsIdMap.delete(lessonId); // id一覧から削除しておく
+    // lesson情報が変更されていた場合 (更新)
+    if (preChangeLessonDetail !== lessonDetail) {
+      updatedLessons.push([preChangeLessonDetail, lessonDetail]);
+    }
+  }
+  // 削除されずに残っている内容は全て削除された授業情報
+  const deletedLessons = [...preChangeLessonsIdMap.values()];
+  return {
+    updatedLessons,
+    createdLessons,
+    deletedLessons,
+  };
+}
+function categorizeLessonsByStudent(
+  updatedLessons,
+  createdLessons,
+  deletedLessons
+) {
+  const lessonChangesMap = new Map([
+    ["❌ 生徒登録なし", []],
+    ["異なる生徒", []],
+  ]);
+  for (const lessons of updatedLessons) {
+    const preChangeLesson = parseLesson(lessons[0]);
+    const postChangeLesson = parseLesson(lessons[1]);
+    if (
+      preChangeLesson[0] !== "❌ 生徒登録なし" &&
+      postChangeLesson[0] !== "❌ 生徒登録なし" &&
+      preChangeLesson[0] !== postChangeLesson[0]
+    ) {
+      // 異なる生徒に変更されていた場合は別途分けておく
+      lessonChangesMap
+        .get("異なる生徒")
+        .push(formatRowLessonChange(preChangeLesson, postChangeLesson));
+    }
+    // 生徒名ごとに分ける
+    const studentName =
+      preChangeLesson[0] === "❌ 生徒登録なし"
+        ? postChangeLesson[0]
+        : preChangeLesson[0];
+    if (!lessonChangesMap.has(studentName)) {
+      lessonChangesMap.set(studentName, []);
+    }
+    lessonChangesMap
+      .get(studentName)
+      .push(formatRowLessonChange(preChangeLesson, postChangeLesson));
+  }
+  const preCreateLesson = ["", "", "", "", "", "", "なし"];
+  for (const lesson of createdLessons) {
+    const parsedLesson = parseLesson(lesson);
+    const studentName = parsedLesson[0];
+    if (!lessonChangesMap.has(studentName)) {
+      lessonChangesMap.set(studentName, []);
+    }
+    lessonChangesMap
+      .get(studentName)
+      .push(formatRowLessonChange(preCreateLesson, parsedLesson));
+  }
+  const postDeleteLesson = ["なし", "", "", "", "", "", ""];
+  for (const lesson of deletedLessons) {
+    const parsedLesson = parseLesson(lesson);
+    const studentName = parsedLesson[0];
+    if (!lessonChangesMap.has(studentName)) {
+      lessonChangesMap.set(studentName, []);
+    }
+    lessonChangesMap
+      .get(studentName)
+      .push(formatRowLessonChange(parsedLesson, postDeleteLesson));
+  }
+  return lessonChangesMap;
+}
+function parseLesson(lessonStr) {
+  const lesson = lessonStr.split(",");
+  return lesson;
+}
+function formatRowLessonChange(preChangeLesson, postChangeLesson) {
+  return preChangeLesson.concat(["→"]).concat(postChangeLesson);
+}
+function formatLessonChanges(lessonChangesMap) {
+  const studentLessLessonChanges = lessonChangesMap.get("❌ 生徒登録なし");
+  const differentStudentLessonChanges = lessonChangesMap.get("異なる生徒");
+  lessonChangesMap.delete("❌ 生徒登録なし");
+  lessonChangesMap.delete("異なる生徒");
+  Logger.log(
+    `生徒登録なし:\n${JSON.stringify(studentLessLessonChanges, null, 2)}`
+  );
+  Logger.log(
+    `異なる生徒:\n${JSON.stringify(differentStudentLessonChanges, null, 2)}`
+  );
+  const formattedLessonChanges = [];
+  const emptyRow = Array.from({ length: 15 }, () => "");
+  for (const key of lessonChangesMap.keys()) {
+    const lessonChanges = lessonChangesMap.get(key);
+    formattedLessonChanges.push(...lessonChanges);
+    formattedLessonChanges.push(emptyRow);
+  }
+  if (studentLessLessonChanges.length > 0) {
+    formattedLessonChanges.push(...studentLessLessonChanges);
+    formattedLessonChanges.push(emptyRow);
+  }
+  if (differentStudentLessonChanges.length > 0) {
+    formattedLessonChanges.push(...differentStudentLessonChanges);
+  }
+  return formattedLessonChanges;
+}
+function recordPreChangeLessons() {
+  const today = new Date();
+  const firstDayOfLastMonth = new Date(
+    today.getFullYear(),
+    today.getMonth() - 1,
+    1
+  );
+  const lessons = fetchAllLessonsAfter(firstDayOfLastMonth);
+  updateRecordPreChangeLessonSheetContent(lessons, firstDayOfLastMonth);
+}
+function fetchAllLessonsAfter(date) {
+  let allSeats = [];
+  let startDateObj = date;
+  while (true) {
+    // 同じ月の最終日
+    const endOfMonthObj = new Date(
+      startDateObj.getFullYear(),
+      startDateObj.getMonth() + 1,
+      0
+    );
+    // 次の月の1日
+    const firstOfNextMonthObj = new Date(
+      startDateObj.getFullYear(),
+      startDateObj.getMonth() + 1,
+      1
+    );
+    // formatDate関数の定義は utils.gs
+    const formattedStartDate = formatDate(startDateObj);
+    const formattedEndDate = formatDate(endOfMonthObj);
+    // fetchSeatsの定義は searchLessons.gs
+    const seatsData = fetchSeats(
+      undefined,
+      undefined,
+      formattedStartDate,
+      formattedEndDate
+    );
+    if (seatsData.length === 0) {
+      break;
+    }
+    const formattedSeats = seatsData
+      .map((seatsByDate) => {
+        return seatsByDate.seats.map((seat) => {
+          const student = seat.seat_students?.[0];
+          const teacher = seat.teacher;
+          return [
+            seat.id.toString(),
+            student ? student.student_name : "❌ 生徒登録なし",
+            teacher ? teacher.name : "❌ 講師登録なし",
+            student ? student.subject : "❌ 生徒登録なし",
+            seat.date,
+            seat.start_time,
+            seat.end_time,
+            student
+              ? student.absent
+                ? "❌ 欠席"
+                : "◯ 出席"
+              : "❌ 生徒登録なし",
+          ];
+        });
+      })
+      .flat();
+    allSeats = allSeats.concat(formattedSeats);
+    startDateObj = firstOfNextMonthObj;
+  }
+  return allSeats;
+}
+function updateRecordPreChangeLessonSheetContent(
+  lessons,
+  fetchLessonStartDate
+) {
+  Logger.log("Executing updateRecordPreChangeLessonSheetContent...");
+  Logger.log(`Lesson Count: ${lessons.length}`);
+  const sheet = SpreadsheetApp.getActiveSpreadsheet().getSheetByName(
+    RECORD_PRE_CHANGE_LESSONS_SHEET_NAME
+  );
+  const lastRow = sheet.getLastRow();
+  const lastColumn = sheet.getLastColumn();
+  if (lastRow > 1) {
+    sheet.getRange(1, 1, lastRow, lastColumn).clearContent();
+  }
+  const headers = [
+    ["id", "生徒名", "講師名", "科目", "日時", "開始時刻", "終了時刻", "出欠"],
+  ];
+  const data = headers.concat(lessons);
+  sheet.getRange(1, 1, data.length, data[0].length).setValues(data);
+  const updatedAtHeaderStr = "最終更新日時";
+  const updatedAt = Utilities.formatDate(
+    new Date(),
+    "Asia/Tokyo",
+    "yyyy/MM/dd HH:mm"
+  );
+  sheet
+    .getRange(1, headers[0].length + 2, 2, 1)
+    .setValues([[updatedAtHeaderStr], [updatedAt]]);
+  const fetchLessonStartDateHeaderStr = "授業取得開始日";
+  sheet
+    .getRange(4, headers[0].length + 2, 2, 1)
+    .setValues([[fetchLessonStartDateHeaderStr], [fetchLessonStartDate]]);
+}
+/**
+ * 「授業削除」のシートの授業削除機能に関するファイル
+ */
+function deleteLessons() {
+  const sheet = SpreadsheetApp.getActiveSpreadsheet().getSheetByName(
+    DELETE_LESSONS_SHEET_NAME
+  );
+  const firstRow = 10;
+  const lastRow = sheet.getLastRow();
+  if (firstRow > lastRow) {
+    alert("先に授業検索を行ってください");
+    throw new Error("授業検索が行われていません");
+  }
+  if (!confirm("選択した授業を本当に削除しますか？")) {
+    return;
+  }
+  // 現在の内容を削除
+  const resultFirstColumn = 10;
+  sheet
+    .getRange(firstRow, resultFirstColumn, lastRow - firstRow + 1, 2)
+    .clearContent();
+  const lastColumn = resultFirstColumn - 2;
+  const lessons = inputLessons(sheet, firstRow, lastRow, lastColumn);
+  Logger.log(lessons);
+  const results = lessons.map((lesson) => {
+    if (!lesson.shouldDelete) {
+      return ["", ""];
+    }
+    if (lesson.shouldDelete) {
+      try {
+        const msg = deleteLesson(lesson.seatId);
+        return ["⭕️", msg];
+      } catch (e) {
+        return ["❌", e];
+      }
+    }
+  });
+  Logger.log(results);
+  sheet
+    .getRange(firstRow, resultFirstColumn, lastRow - firstRow + 1, 2)
+    .setValues(results);
+}
+function inputLessons(sheet, firstRow, lastRow, lastColumn) {
+  // 指定したCellの値を読み取る
+  const inputValues = sheet
+    .getRange(firstRow, 1, lastRow - firstRow + 1, lastColumn)
+    .getValues();
+  const lessons = inputValues.map((value) => {
+    return {
+      shouldDelete: value[0],
+      teacherName: value[1],
+      studentName: value[2],
+      subject: value[3],
+      comaName: value[4],
+      date: value[5],
+      seatId: value[6],
+      classroom: value[7],
+    };
+  });
+  return lessons;
+}
+function deleteLesson(seatId) {
+  const endpoint = `/${COMIRU_SCHOOL_ID}/seats/${seatId}`;
+  const [res, resCode] = callComiruDeleteApi(endpoint);
+  if (resCode !== 200) {
+    throw new Error(
+      `Error - deleteLesson:\nResponseCode ${resCode}\n${res.message}`
+    );
+  }
+  return res.message;
+}
+/**
+ * 「授業削除」のシートの授業検索機能に関するファイル
+ */
+function searchLessons() {
+  const sheet = SpreadsheetApp.getActiveSpreadsheet().getSheetByName(
+    DELETE_LESSONS_SHEET_NAME
+  );
+  const searchValues = inputValues(sheet);
+  const {
+    teacherId,
+    studentId,
+    startDate,
+    endDate,
+    startTime,
+    endTime,
+    subjectName,
+  } = formatInputValues(searchValues);
+  // 授業を検索
+  const seats = fetchSeats(teacherId, studentId, startDate, endDate);
+  const filteredSeats = filterSeats(seats, startTime, endTime, subjectName);
+  Logger.log(`filteredSeats: ${JSON.stringify(filteredSeats, null, 2)}`);
+  const outputs = formatOutputs(filteredSeats);
+  Logger.log(`outputs: ${JSON.stringify(outputs, null, 2)}`);
+  const firstRow = 10;
+  const lastRow = sheet.getLastRow();
+  const lastColumn = sheet.getLastColumn();
+  // 現在の内容を削除
+  if (firstRow < lastRow) {
+    sheet
+      .getRange(firstRow, 2, lastRow - firstRow + 1, lastColumn - 1)
+      .clearContent();
+    sheet.getRange(firstRow, 1, lastRow - firstRow + 1, 1).removeCheckboxes();
+  }
+  // outputsが存在するなら書き込みを行う
+  if (outputs && outputs.length > 0) {
+    sheet.getRange(firstRow, 1, outputs.length, 1).insertCheckboxes();
+    sheet
+      .getRange(firstRow, 2, outputs.length, outputs[0].length)
+      .setValues(outputs);
+  }
+}
+function inputValues(sheet) {
+  const inputRange = "B3:G3";
+  // 指定したCellの値を読み取る
+  const inputValues = sheet.getRange(inputRange).getValues()[0];
+  const searchValues = {
+    teacherName: inputValues[0],
+    studentName: inputValues[1],
+    subjectName: inputValues[2],
+    comaName: inputValues[3],
+    startDate: inputValues[4],
+    endDate: inputValues[5],
+  };
+  return searchValues;
+}
+// 授業検索に必要な情報をformat
+function formatInputValues(searchValues) {
+  const teacherName = searchValues.teacherName;
+  const studentName = searchValues.studentName;
+  const teacherId = teacherName
+    ? getTeacherIdFromTeacherName(teacherName)
+    : null;
+  const studentId = studentName
+    ? getStudentIdFromStudentName(studentName)
+    : null;
+  const date1 = searchValues.startDate;
+  const date2 = searchValues.endDate;
+  if (!date1 || !date2) {
+    alert("検索開始日と終了日を両方入力してください");
+    throw new Error("検索開始日と終了日が入力されていません");
+  }
+  const [startDate, endDate] = date1 < date2 ? [date1, date2] : [date2, date1];
+  // 日付の差をミリ秒で計算
+  const diffInMilliseconds = endDate.getTime() - startDate.getTime();
+  // 終了日と開始日の差が3ヶ月を超えていないかをチェック
+  if (diffInMilliseconds > ONE_MONTH_IN_MILLISECONDS * 3) {
+    alert("検索開始日と終了日の差は3ヶ月以内にしてください");
+    throw new Error(`検索開始日と終了日が3ヶ月以上離れています`);
+  }
+  const formattedStartDate = formatDate(startDate);
+  const formattedEndDate = formatDate(endDate);
+  const comaName = searchValues.comaName;
+  const comaId = comaName ? getComaIdFromDisplayedName(comaName) : null;
+  const [startTime, endTime] = comaId
+    ? getStartAndEndTimeByComaId(comaId)
+    : [null, null];
+  const subjectName = searchValues.subjectName;
+  return {
+    teacherId,
+    studentId,
+    startDate: formattedStartDate,
+    endDate: formattedEndDate,
+    startTime,
+    endTime,
+    subjectName,
+  };
+}
+/**
+ * 指定した日にちの授業情報を取得する関数
+ *
+ * apiについては以下を参照
+ * https://api.stage.comiru.com/docs/corporation-api#tag/%E5%BA%A7%E5%B8%AD%E7%AE%A1%E7%90%86/operation/corporationSeatIndex
+ */
+function fetchSeats(teacherId, studentId, startDate, endDate) {
+  const endpoint = `/${COMIRU_SCHOOL_ID}/seats`;
+  const results = [];
+  for (let page = 1; ; page++) {
+    const payload = {
+      ...(teacherId && { teacher_id: teacherId }),
+      ...(studentId && { student_id: studentId }),
+      type: 0,
+      start_date: startDate,
+      end_date: endDate,
+      page: page,
+    };
+    Logger.log(`payload: ${JSON.stringify(payload, null, 2)}`);
+    const [res, resCode] = callComiruGetApi(endpoint, payload);
+    if (resCode !== 200) {
+      throw new Error(
+        `Error - fetchSeats:\nResponseCode ${resCode}\n${res.message}`
+      );
+    }
+    if (res.data.length === 0) {
+      break;
+    }
+    results.push(res.data);
+    Utilities.sleep(200);
+  }
+  return results.flat();
+}
+function filterSeats(seats, startTime, endTime, subjectName) {
+  const filteredSeats = seats
+    .map((data) => {
+      return data.seats.filter((seat) => {
+        // 授業の開始時間と科目が一致していることを確認する
+        if (startTime && seat.start_time !== startTime) return false;
+        if (endTime && seat.end_time !== endTime) return false;
+        if (subjectName && seat.seat_students?.[0]?.subject !== subjectName)
+          return false;
+        return true;
+      });
+    })
+    .map((data) => {
+      return data.map((seat) => {
+        // 項目数が多いため、必要な項目だけを返すようにする
+        const comaName = getDisplayedNameFromStartAndEndTime(
+          seat.start_time,
+          seat.end_time
+        );
+        return {
+          id: seat.id,
+          date: seat.date,
+          coma_name: comaName,
+          teacher_name: seat.teacher.name,
+          student_name: seat.seat_students[0].student_name ?? "",
+          classroom: seat.classroom,
+          subject: seat.seat_students[0].subject ?? "",
+        };
+      });
+    });
+  const flattenedSeats = filteredSeats.flat();
+  return flattenedSeats;
+}
+function formatOutputs(seats) {
+  const formattedSeats = seats.map((seat) => {
+    return [
+      seat.teacher_name,
+      seat.student_name,
+      seat.subject,
+      seat.coma_name,
+      formatDateWithDayOfWeekInJP(new Date(seat.date)),
+      seat.id,
+      seat.classroom,
+    ];
+  });
+  return formattedSeats;
+}
+function formatDateWithDayOfWeekInJP(date) {
+  const dayOfWeek = ["日", "月", "火", "水", "木", "金", "土"];
+  const formatted =
+    Utilities.formatDate(date, "Asia/Tokyo", "yyyy年MM月dd日") +
+    "(" +
+    dayOfWeek[date.getDay()] +
+    ")";
+  return formatted;
+}
+/**
+ * 「授業コマリスト」のシートに関するファイル
+ */
+/**
+ * 授業コマリストをComiru API経由で更新する関数。
+ * 定期的に実行することで最新状態を保つ。
+ */
+function updateComaList() {
+  const sheetName = COMA_LIST_SHEET_NAME;
+  const sheet = SpreadsheetApp.getActiveSpreadsheet().getSheetByName(sheetName);
+  const comas = fetchComas();
+  Logger.log("Fetched comas:  " + JSON.stringify(comas, null, 2));
+  const headers = ["ID", "コマ名", "開始時刻", "終了時刻", "表示名"];
+  // 一度リストの内容を消して最初から書き直す
+  const lastRow = sheet.getLastRow();
+  sheet.getRange(1, 1, lastRow, headers.length).clearContent();
+  // ヘッダーを設定
+  sheet
+    .getRange(1, 1, 1, headers.length) // .getRange(row, column, numRows, numColumns)
+    .setValues([headers]);
+  // シートに書き込む際は[row][column]の二次元配列にする必要があるので.mapを用いて二次元配列に変換
+  const formattedData = comas.map((coma) => [
+    coma.id,
+    coma.coma_no,
+    coma.time_start,
+    coma.time_end,
+    `[${coma.time_start.padStart(5, " ")} - ${coma.time_end.padStart(
+      5,
+      " "
+    )}] ${coma.coma_no}`,
+  ]);
+  Logger.log("Formatted coma data: " + JSON.stringify(formattedData, null, 2));
+  // 科目リストを一括でシートに描画
+  sheet
+    .getRange(2, 1, formattedData.length, formattedData[0].length) // .getRange(row, column, numRows, numColumns)
+    .setValues(formattedData);
+}
+/**
+ * 特定の校舎の授業コマ一覧を取得する関数。
+ *
+ * 取得できる項目は以下を参照
+ * https://api.stage.comiru.com/docs/corporation-api#tag/%E3%82%B3%E3%83%9E/operation/corporationApiComaIndex
+ */
+function fetchComas() {
+  const endpoint = `/${COMIRU_SCHOOL_ID}/comas`;
+  const [res, resCode] = callComiruGetApi(endpoint, { type: 0 });
+  if (resCode !== 200) {
+    throw new Error(
+      `Error - fetchComas:\nResponseCode ${resCode}\n${res.message}`
+    );
+  }
+  return res.data;
+}
+/**
+ * 表示名からコマIDを取得する関数を作成する関数
+ * シート情報を何回も取得すると遅くなるのでここで一回だけ取得したものを複数回利用するようにする
+ */
+function createGetComaIdFromDisplayedName() {
+  const sheet =
+    SpreadsheetApp.getActiveSpreadsheet().getSheetByName(COMA_LIST_SHEET_NAME);
+  const lastRow = sheet.getLastRow();
+  const lastColumn = sheet.getLastColumn();
+  const comaList = sheet.getRange(2, 1, lastRow - 1, lastColumn).getValues();
+  // この部分がgetComaIdFromDisplayedName関数の部分
+  return function (displayedName) {
+    // 表示名が一致する行を取得する
+    const targetComaData = comaList.find((coma) => displayedName === coma[4]);
+    return targetComaData[0];
+  };
+}
+/**
+ * 開始時刻と終了時刻からコマIDを取得する関数
+ */
+const getComaIdFromDisplayedName = createGetComaIdFromDisplayedName();
+/**
+ * 開始時刻と終了時刻から表示名を取得する関数を作成する関数
+ * シート情報を何回も取得すると遅くなるのでここで一回だけ取得したものを複数回利用するようにする
+ */
+function createGetDisplayedNameFromStartAndEndTime() {
+  const sheet =
+    SpreadsheetApp.getActiveSpreadsheet().getSheetByName(COMA_LIST_SHEET_NAME);
+  const lastRow = sheet.getLastRow();
+  const lastColumn = sheet.getLastColumn();
+  // 9:00などをDate型ではなく文字列として取得するためにgetDisplayValuesを使用
+  const comaList = sheet
+    .getRange(2, 1, lastRow - 1, lastColumn)
+    .getDisplayValues();
+  // この部分がgetDisplayedNameFromStartAndEndTime関数の部分
+  return function (startTime, endTime) {
+    // 開始時刻と終了時刻が一致する行を取得する
+    const targetComaData = comaList.find((coma) => {
+      return (
+        startTime === coma[2].padStart(5, "0") &&
+        endTime === coma[3].padStart(5, "0")
+      );
+    });
+    return targetComaData[4];
+  };
+}
+/**
+ * 開始時刻と終了時刻から表示名を取得する関数
+ */
+const getDisplayedNameFromStartAndEndTime =
+  createGetDisplayedNameFromStartAndEndTime();
+/**
+ * coma_idから開始時刻と終了時刻を取得する関数
+ */
+function getStartAndEndTimeByComaId(comaId) {
+  const sheet =
+    SpreadsheetApp.getActiveSpreadsheet().getSheetByName(COMA_LIST_SHEET_NAME);
+  const lastRow = sheet.getLastRow();
+  const lastColumn = sheet.getLastColumn();
+  const comaList = sheet.getRange(2, 1, lastRow - 1, lastColumn).getValues();
+  const targetComaData = comaList.find((coma) => comaId === coma[0]);
+  // HH:MM の形にformatする
+  const startTime = new Intl.DateTimeFormat("ja-JP", {
+    hour: "2-digit",
+    minute: "2-digit",
+    timeZone: "Asia/Tokyo",
+  }).format(targetComaData[2]);
+  const endTime = new Intl.DateTimeFormat("ja-JP", {
+    hour: "2-digit",
+    minute: "2-digit",
+    timeZone: "Asia/Tokyo",
+  }).format(targetComaData[3]);
+  return [startTime, endTime];
+}
+/**
+ * 「科目リスト」のシートに関するファイル
+ */
+/**
+ * 科目リストをComiru API経由で更新する関数。
+ * 定期的に実行することで最新状態を保つ。
+ */
+function updateSubjectList() {
+  const sheetName = SUBJECT_LIST_SHEET_NAME;
+  const sheet = SpreadsheetApp.getActiveSpreadsheet().getSheetByName(sheetName);
+  const subjects = fetchSubjects();
+  Logger.log("Fetched subjects: " + JSON.stringify(subjects, null, 2));
+  const headers = ["名前"];
+  // 一度リストの内容を消して最初から書き直す
+  const lastRow = sheet.getLastRow();
+  sheet.getRange(1, 1, lastRow, headers.length).clearContent();
+  // ヘッダーを設定
+  sheet
+    .getRange(1, 1, 1, headers.length) // .getRange(row, column, numRows, numColumns)
+    .setValues([headers]);
+  // シートに書き込む際は[row][column]の二次元配列にする必要があるので.mapを用いて二次元配列に変換
+  const formattedData = subjects.map((subject) => [subject]);
+  // 科目リストを一括でシートに描画
+  sheet
+    .getRange(2, 1, formattedData.length, formattedData[0].length) // .getRange(row, column, numRows, numColumns)
+    .setValues(formattedData);
+}
+/**
+ * 特定の校舎の科目一覧を取得する関数。
+ *
+ * 取得できる項目は以下を参照
+ * https://api.stage.comiru.com/docs/corporation-api#tag/%E7%A7%91%E7%9B%AE
+ */
+function fetchSubjects() {
+  const endpoint = `/${COMIRU_SCHOOL_ID}/subjects`;
+  const [res, resCode] = callComiruGetApi(endpoint);
+  if (resCode !== 200) {
+    throw new Error(
+      `Error - fetchSubjects:\nResponseCode ${resCode}\n${res.message}`
+    );
+  }
+  return res.data;
+}
+/**
+ * 「講師リスト」と「生徒リスト」のシートに関するファイル
+ * やることが似ているので一つのファイルにまとめている
+ */
+/**
+ * 講師リストと生徒リストをComiru API経由で更新する関数。
+ * 定期的に実行することで最新状態を保つ。
+ */
+function updateTeacherList() {
+  const sheetName = TEACHER_LIST_SHEET_NAME;
+  const teachers = fetchTeachers();
+  updateSheetContent(sheetName, teachers);
+}
+function updateStudentList() {
+  const sheetName = STUDENT_LIST_SHEET_NAME;
+  const students = fetchStudents();
+  updateSheetContent(sheetName, students);
+}
+/**
+ * 特定の校舎の講師一覧と生徒一覧を取得する関数。
+ *
+ * 取得できる項目は以下を参照
+ * https://api.stage.comiru.com/docs/corporation-api#tag/Teacher/operation/corporationApiTeachers
+ * https://api.stage.comiru.com/docs/corporation-api#tag/Student/operation/corporationApiStudents
+ */
+function fetchTeachers() {
+  const endpoint = `/${COMIRU_SCHOOL_ID}/teachers`;
+  const [res, resCode] = callComiruGetApi(endpoint);
+  if (resCode !== 200) {
+    throw new Error(
+      `Error - fetchTeachers:\nResponseCode ${resCode}\n${res.message}`
+    );
+  }
+  return res;
+}
+function fetchStudents() {
+  const endpoint = `/${COMIRU_SCHOOL_ID}/students`;
+  const [res, resCode] = callComiruGetApi(endpoint);
+  if (resCode !== 200) {
+    throw new Error(
+      `Error - fetchStudents:\nResponseCode ${resCode}\n${res.message}`
+    );
+  }
+  return res.data; // studentsの場合は .data の中に配列が入っている
+}
+/**
+ * 与えられた情報を用いてシートの内容を更新する関数
+ */
+function updateSheetContent(sheetName, dataList) {
+  const sheet = SpreadsheetApp.getActiveSpreadsheet().getSheetByName(sheetName);
+  const headers = ["ID", "名前"];
+  // 一度リストの内容を消して最初から書き直す
+  const lastRow = sheet.getLastRow();
+  sheet.getRange(1, 1, lastRow, headers.length).clearContent();
+  // ヘッダーを設定
+  sheet
+    .getRange(1, 1, 1, headers.length) // .getRange(row, column, numRows, numColumns)
+    .setValues([headers]);
+  // columnStr は「除外IDリスト」の列のアルファベット
+  const columnStr = "H";
+  const excludeIdList = sheet
+    .getRange(`${columnStr}2:${columnStr}`) // columnStrで指定した列の2行目以降を全て取得する
+    .getValues()
+    .filter((row) => typeof row[0] === "number") // 2行目以降を全て取得するために含まれる空の行を除外する
+    .map((row) => row[0]); // .getValues() で取得できるのは values[row][column] の二重配列なので column=0 を指定して中身を取り出す
+  // 情報をシートに一度に書き込むため、必要な情報だけを取り出す。
+  const formattedData = dataList
+    .filter((data) => !excludeIdList.includes(data.id)) // 除外リストに含まれないdataだけをfilterする
+    .map((data) => {
+      Logger.log(JSON.stringify(data, null, 2));
+      return [data.id, data.name];
+    });
+  // dataリストを一括でシートに描画
+  sheet
+    .getRange(2, 1, formattedData.length, formattedData[0].length) // .getRange(row, column, numRows, numColumns)
+    .setValues(formattedData);
+}
+/**
+ * 講師名から講師IDを取得する関数を作成する関数
+ * シート情報を何回も取得すると遅くなるのでここで一回だけ取得したものを複数回利用するようにする
+ */
+function createGetTeacherIdFromTeacherName() {
+  const sheet = SpreadsheetApp.getActiveSpreadsheet().getSheetByName(
+    TEACHER_LIST_SHEET_NAME
+  );
+  const lastRow = sheet.getLastRow();
+  const lastColumn = 2;
+  const teacherList = sheet.getRange(2, 1, lastRow - 1, lastColumn).getValues();
+  // この部分がgetTeacherIdFromTeacherName関数の部分
+  return function (teacherName) {
+    // 表示名が一致する行を取得する
+    const teacherData = teacherList.find(
+      (teacher) => teacherName === teacher[1]
+    );
+    if (!teacherData) {
+      throw new Error(`指定した講師が見つかりません: ${teacherName}`);
+    }
+    return teacherData[0];
+  };
+}
+/**
+ * 表示名からコマIDを取得する関数
+ */
+const getTeacherIdFromTeacherName = createGetTeacherIdFromTeacherName();
+/**
+ * 生徒名から生徒IDを取得する関数を作成する関数
+ * シート情報を何回も取得すると遅くなるのでここで一回だけ取得したものを複数回利用するようにする
+ */
+function createGetStudentIdFromStudentName() {
+  const sheet = SpreadsheetApp.getActiveSpreadsheet().getSheetByName(
+    STUDENT_LIST_SHEET_NAME
+  );
+  const lastRow = sheet.getLastRow();
+  const lastColumn = 2;
+  const studentList = sheet.getRange(2, 1, lastRow - 1, lastColumn).getValues();
+  // この部分がgetStudentIdFromStudentName関数の部分
+  return function (studentName) {
+    // 表示名が一致する行を取得する
+    const studentData = studentList.find(
+      (student) => studentName === student[1]
+    );
+    if (!studentData) {
+      throw new Error(`指定した生徒が見つかりません: ${studentName}`);
+    }
+    return studentData[0];
+  };
+}
+/**
+ * 表示名からコマIDを取得する関数
+ */
+const getStudentIdFromStudentName = createGetStudentIdFromStudentName();
+/**
+ * すでに登録されている授業情報を再度登録しようとしていないかを確認するための処理に関するファイル
+ * 思っていたよりもシンプルな実装で実現できたのでファイルを分ける必要はなかったかも
+ */
+/**
+ * coma_idが一致している授業一覧を受け取り、その中に生徒名と講師名が一致している授業が存在しているかどうかを確認する関数
+ * absentがtrueの場合は欠席で登録されているものなのでabsentがtrueになっているものは無視する(この処理で良いのかは要確認)
+ */
+function checkIsDuplicated(seats, registerInfo) {
+  if (seats === null) {
+    return false;
+  }
+  // 生徒名と講師名が一致するかを順にfilterする
+  const sameStudentAndTeacher = seats
+    .filter((seat) => {
+      return seat.student_name === registerInfo.studentName;
+    })
+    .filter((seat) => {
+      return seat.teacher_name === registerInfo.teacherName;
+    })
+    .filter((seat) => {
+      return seat.absent === false;
+    });
+  // 両方とも一致する授業が存在する場合には重複して登録しようとしていると判断する
+  if (sameStudentAndTeacher.length) {
+    Logger.log("This lesson data has already been registered.");
+    return true;
+  }
+  return false;
+}
+/**
+ * 授業登録時に "classroom" の値が既存の授業と被っているとエラーが出て登録できないので
+ * 該当日時・時限のすでに登録されている授業一覧を取得して、それに被らないclassroomを見つける関数を定義するファイル
+ *
+ * 少し処理が重たくなるのでファイルを分割した
+ */
+/**
+ * 使用されていないclassroomを見つける関数
+ */
+function findUnusedClassroom(seats) {
+  if (seats === null) {
+    return "A";
+  }
+  const isUsedClassroomList = getIsUsedClassroomListFromSeatsData(seats);
+  const targetClassroomStr = findFirstUnusedClassroomStr(isUsedClassroomList);
+  return targetClassroomStr;
+}
+/**
+ * 授業情報から該当コマ(開始時刻と終了時刻が一致している)のclassroom情報を集め、
+ * 使用されているclassroomはtrue, 使用されていないclassroomはfalseとした配列を返却する関数
+ */
+function getIsUsedClassroomListFromSeatsData(seats) {
+  // 授業情報を一つずつ確認してclassroomを取得する
+  const classroomStrList = seats.map((seat) => {
+    return seat.classroom;
+  });
+  Logger.log(`classroomStrList: ${classroomStrList}`);
+  // nullではないclassroomのアルファベットをindexに変換する
+  const classroomIndexList = classroomStrList
+    .filter((data) => data !== null)
+    .map((classroomStr) => alphabetToNumber(classroomStr));
+  // A-Z, αの27個分の配列を用意し、該当するアルファベットの部分をtrue, そうでない部分をfalseとした配列を取得する
+  const isUsedClassroomList = range(27).map((i) => {
+    if (classroomIndexList.includes(i)) {
+      return true;
+    }
+    return false;
+  });
+  Logger.log(`isUsedClassroomList: ${isUsedClassroomList}`);
+  return isUsedClassroomList;
+}
+/**
+ * アルファベットから0-25の数字に変換する関数
+ * αの場合は26を返す
+ */
+function alphabetToNumber(char) {
+  if (char === "α") {
+    return 26;
+  }
+  return char.charCodeAt(0) - 65;
+}
+/**
+ * 与えられたisUsedClassroomListから最初に出てくる未使用のclassroomをアルファベット表記した文字列を取得する関数
+ */
+function findFirstUnusedClassroomStr(isUsedClassroomList) {
+  // usedClassrooms配列に出てくる最初のfalseのindexを検索する
+  const targetIndex = isUsedClassroomList.indexOf(false);
+  if (targetIndex === -1) {
+    // 空いているclassroomがなかった場合はnullで登録する
+    Logger.log(`Available classroom is not found.`);
+    return null;
+  }
+  // 0-25まではアルファベット、26の場合だけ"α"という名前のclassroomとして登録されている
+  const targetClassroomStr = numberToUpperAlphabet(targetIndex);
+  Logger.log(`Classroom ${targetClassroomStr} is available.`);
+  return targetClassroomStr;
+}
+/**
+ * 0-25の数字を大文字アルファベットに変換する関数
+ * 26の場合はαを返却する
+ */
+function numberToUpperAlphabet(n) {
+  if (n === 26) {
+    return "α";
+  }
+  return String.fromCharCode(65 + n); // 65 = 'A'
+}
+/**
+ * 「授業登録」のシートに関するファイル
+ */
+/**
+ * 授業登録を行うための関数
+ * スプシから入力データを取得し、validなデータであればComiruに登録する
+ */
+function registerLessons() {
+  const sheet = SpreadsheetApp.getActiveSpreadsheet().getSheetByName(
+    REGISTER_LESSONS_SHEET_NAME
+  );
+  // スプシから入力されたデータを取得する
+  const lessonInfoList = inputLessonInfoList(sheet);
+  // 登録が成功した行の「登録する」のチェックボックスを外すために保持するための配列
+  const successRowIndexes = [];
+  // 入力データを一つずつ確認し、validなデータをComiruに登録する
+  const results = lessonInfoList.map((lessonInfo, i) => {
+    const lineNumStr = (i + 5).toString().padStart(2, " ");
+    Logger.log(`Trying to register input data in line ${lineNumStr}...`);
+    // validなデータかどうかを確認し、invalidであった場合は登録をskipする
+    const [isValid, invalidMessage] = checkIsValidLessonInfo(lessonInfo);
+    if (!isValid) {
+      Logger.log(`Line${lineNumStr} data is isvalid:\n${invalidMessage}`);
+      return ["✖️", invalidMessage];
+    }
+    // apiを短時間に叩きすぎないようにするため以下を実行する前に0.5秒待つ。
+    // 1ループあたり「空いているclassroom情報取得」と「授業情報登録」の際の計2回ずつapiを叩く
+    // ※ Comiru APIのリクエスト制限は20回/秒 (推奨は5回以下/秒)
+    // https://api.stage.comiru.com/docs/corporation-api#section/%E3%83%AA%E3%82%AF%E3%82%A8%E3%82%B9%E3%83%88%E6%95%B0
+    Utilities.sleep(500);
+    try {
+      // lessonInfoからpayloadを作成してComiruに登録を行う
+      const payload = createPayload(lessonInfo.registerInfo);
+      if (payload === null) {
+        Logger.log(
+          `Line${lineNumStr} payload creation failed. Similar lesson data is already registered.`
+        );
+        showToast(`${lineNumStr}行目: 同様の授業情報がすでに登録されています`);
+        return ["✖️", "同様の授業情報がすでに登録されています"];
+      }
+      Logger.log(
+        `Line${lineNumStr} payload: ${JSON.stringify(payload, null, 2)}`
+      );
+      registerLessonWithPayload(payload);
+      successRowIndexes.push(i);
+      Logger.log(`Line${lineNumStr} data is registered successfully.`);
+      showToast(`${lineNumStr}行目: 正常に登録されました`);
+      return ["⭕️", ""];
+    } catch (e) {
+      Logger.log(`Line${lineNumStr} erred in registerLessons:\n` + e.message);
+      showToast(`${lineNumStr}行目: エラーが発生しました\n${e.message}`);
+      return ["✖️", e.message];
+    }
+  });
+  // 実行結果をスプシに反映する
+  const resultFirstRow = 5;
+  const resultFirstColumn = 9;
+  sheet
+    .getRange(
+      resultFirstRow, // row
+      resultFirstColumn, // column
+      results.length, // numRow
+      results[0].length // numColumn
+    )
+    .setValues(results);
+  Logger.log(`successRowIndexes: ` + JSON.stringify(successRowIndexes));
+  // 登録が成功した行の「登録する」のチェックを外す
+  for (row of successRowIndexes) {
+    sheet.getRange(row + resultFirstRow, 1, 1, 1).uncheck();
+  }
+}
+/**
+ * 入力されたデータがvalidなものであるかどうかを確認する
+ *
+ * 返り値は [isValid, invalidMessage] (isValid: boolean, invalidMessage: string)
+ */
+function checkIsValidLessonInfo(lessonInfo) {
+  if (lessonInfo.isValid) {
+    // validな場合はエラーメッセージはundefinedにする
+    return [true, undefined];
+  }
+  // --- invalid な入力の場合 ---
+  // 「登録する」がtrueであることを確認する
+  if (!lessonInfo.registerInfo.shouldRegister) {
+    return [false, "「登録する」にチェックが入っていません"];
+  }
+  // その他の場合は「ノート」以外のセルに空欄があるものと判断する
+  return [false, "入力必須項目が入力されていません"];
+}
+/**
+ * lessonInfoからpayloadを作成する
+ * 別のシートから情報を読み取る関数は該当シートのgsファイルに定義している
+ *
+ * ※ objectは { key: value } というような形で書くが、
+ * { aaa: aaa } のように書ける場合は { aaa } と省略できる
+ */
+function createPayload(registerInfo) {
+  const coma_id = getComaIdFromDisplayedName(registerInfo.comaDisplayedName);
+  const date = formatDate(registerInfo.date);
+  // 該当日時の授業情報を取得する
+  const targetClassroomSeats = getTargetClassroomSeats(date, coma_id);
+  const classroom = findUnusedClassroom(targetClassroomSeats);
+  const note = registerInfo.note || undefined; // 空文字の場合はundefinedにする
+  const teacher_id = getTeacherIdFromTeacherName(registerInfo.teacherName);
+  const max_seats = 1; // 固定値
+  const is_public = true; // 固定値
+  const student_id = getStudentIdFromStudentName(registerInfo.studentName);
+  const subject = registerInfo.subjectName;
+  const students = [{ student_id, subject }];
+  const isDuplicated = checkIsDuplicated(targetClassroomSeats, registerInfo);
+  if (isDuplicated) {
+    Logger.log(
+      "Error - createPayload: 同様の授業情報がすでに登録されています。"
+    );
+    return null;
+  }
+  const payload = {
+    coma_id,
+    date,
+    classroom,
+    ...(note?.trim() && { note }), // noteの中身がない(undefined)の場合は展開した際に削除される
+    teacher_id,
+    max_seats,
+    is_public,
+    students,
+  };
+  return payload;
+}
+/**
+ * 該当日時の授業情報を取得し、該当コマの情報だけを抜き出す
+ */
+function getTargetClassroomSeats(date, comaId) {
+  const seats = fetchSeatsByDate(date);
+  if (seats === null) {
+    return null;
+  }
+  // スプシの情報を用いてコマIDから開始時刻と終了時刻を取得する
+  const [startTime, endTime] = getStartAndEndTimeByComaId(comaId);
+  Logger.log(
+    `coma_id: ${comaId}\n\t-> start_time=${startTime}, end_time=${endTime}`
+  );
+  // コマ情報(開始時刻と終了時刻)が一致する授業情報のみをfilterする
+  const targetClassroomSeats = seats
+    .filter((seat) => {
+      return seat.start_time === startTime && seat.end_time === endTime;
+    })
+    .map((seat) => {
+      // 項目数が多いため、必要な項目だけを返すようにする
+      return {
+        id: seat.id,
+        date: seat.date,
+        start_time: seat.start_time,
+        end_time: seat.end_time,
+        classroom: seat.classroom,
+        teacher_name: seat.teacher.name,
+        student_name: seat.seat_students?.[0]?.student_name ?? null,
+        subject: seat.seat_students?.[0]?.subject ?? null,
+        absent: seat.seat_students?.[0]?.absent ?? false,
+      };
+    });
+  Logger.log(
+    `targetClassroomSeats: ${JSON.stringify(targetClassroomSeats, null, 2)}`
+  );
+  return targetClassroomSeats;
+}
+/**
+ * 指定した日にちの授業情報を取得する関数
+ *
+ * apiについては以下を参照
+ * https://api.stage.comiru.com/docs/corporation-api#tag/%E5%BA%A7%E5%B8%AD%E7%AE%A1%E7%90%86/operation/corporationSeatIndex
+ */
+function fetchSeatsByDate(date) {
+  const endpoint = `/${COMIRU_SCHOOL_ID}/seats`;
+  const payload = {
+    type: 0,
+    start_date: date,
+    end_date: date,
+  };
+  const [res, resCode] = callComiruGetApi(endpoint, payload);
+  if (resCode !== 200) {
+    throw new Error(
+      `Error - fetchSeatsByDate:\nResponseCode ${resCode}\n${res.message}`
+    );
+  }
+  if (!res.data || res.data.length === 0) {
+    Logger.log("No lesson data is found.");
+    return null;
+  }
+  return res.data[0].seats;
+}
+/**
+ * payloadを用いて授業登録を行う
+ */
+function registerLessonWithPayload(payload) {
+  const endpoint = `/${COMIRU_SCHOOL_ID}/seats`;
+  const [res, resCode] = callComiruPostApi(endpoint, payload);
+  if (resCode !== 201) {
+    Logger.log(
+      `Error - registerLessonWithPayload:\nResponseCode ${resCode}\n${res.message}`
+    );
+    throw new Error(res.message);
+  }
+  Logger.log(
+    `Lesson data is registered successfully:\n${JSON.stringify(res, null, 2)}`
+  );
+}
+/**
+ * ユーザーが入力した授業情報の値を読み取る関数
+ */
+function inputLessonInfoList(sheet) {
+  // --- 必要に応じて書き換える ---
+  const inputFirstRow = 5;
+  const inputLastRow = Math.min(sheet.getLastRow(), inputFirstRow + 49); // 多くても50行に制限する
+  const inputFirstColumn = "A";
+  const inputLastColumn = "G";
+  // 指定したCellの値を読み取る
+  const inputValues = sheet
+    .getRange(
+      `${inputFirstColumn}${inputFirstRow}:${inputLastColumn}${inputLastRow}`
+    )
+    .getValues();
+  const inputLessonInfo = inputValues.map((value, i) => {
+    Logger.log(`Input data (line${i + 5}): ${JSON.stringify(value, null, 2)}`);
+    // note以外のセルが全て入力されているかどうかを示すboolean
+    const isValid = value.slice(0, 6).every(Boolean);
+    return {
+      isValid: isValid,
+      registerInfo: {
+        shouldRegister: value[0],
+        studentName: value[1],
+        teacherName: value[2],
+        subjectName: value[3],
+        date: value[4],
+        comaDisplayedName: value[5],
+        note: value[6],
+      },
+    };
+  });
+  return inputLessonInfo;
+}
+/**
+ * 「レギュラー授業登録」のシートの授業検索機能に関するファイル
+ */
+function registerRegularLessons() {
+  const sheet = SpreadsheetApp.getActiveSpreadsheet().getSheetByName(
+    REGISTER_REGULAR_LESSONS_SHEET_NAME
+  );
+  // スプシから入力されたデータを取得する
+  const lessonInfoList = inputRegularLessonInfoList(sheet);
+  // 登録が成功した行の「登録する」のチェックボックスを外すために保持するための配列
+  const successRowIndexes = [];
+  // 入力データを一つずつ確認し、validなデータをComiruに登録する
+  const results = lessonInfoList.map((lessonInfo, i) => {
+    const lineNumStr = (i + 5).toString().padStart(2, " ");
+    Logger.log(`Trying to register input data in line ${lineNumStr}...`);
+    // validなデータかどうかを確認し、invalidであった場合は登録をskipする
+    const [isValid, invalidMessage] = checkIsValidLessonInfo(lessonInfo); // 定義はregisterLessons.gs
+    if (!isValid) {
+      Logger.log(`Line${lineNumStr} data is isvalid:\n${invalidMessage}`);
+      return ["✖️", invalidMessage];
+    }
+    const registerInfo = lessonInfo.registerInfo;
+    const firstValidDate = findFirstValidDate(registerInfo);
+    if (!firstValidDate) {
+      return ["✖️", "登録期間内に有効な日付がありません"];
+    }
+    try {
+      for (
+        let date = firstValidDate;
+        date <= registerInfo.endDate;
+        date.setDate(date.getDate() + 7)
+      ) {
+        // apiを短時間に叩きすぎないようにするため以下を実行する前に0.5秒待つ。
+        // 1ループあたり「空いているclassroom情報取得」と「授業情報登録」の際の計2回ずつapiを叩く
+        // ※ Comiru APIのリクエスト制限は20回/秒 (推奨は5回以下/秒)
+        // https://api.stage.comiru.com/docs/corporation-api#section/%E3%83%AA%E3%82%AF%E3%82%A8%E3%82%B9%E3%83%88%E6%95%B0
+        Utilities.sleep(500);
+        // lessonInfoからpayloadを作成してComiruに登録を行う
+        const newRegisterInfo = { ...registerInfo, date }; // dateの項目を加えたobject
+        const payload = createPayload(newRegisterInfo); // 定義はregisterLessons.gs
+        if (payload === null) {
+          Logger.log(
+            `Line${lineNumStr} payload creation failed. Similar lesson data is already registered on ${formatDate(
+              date
+            )}. Skipping registration.`
+          );
+          showToast(
+            `${lineNumStr}行目: ${formatDate(
+              date
+            )} に同様の授業情報がすでに登録されているため登録をスキップしました`
+          );
+          continue;
+        }
+        Logger.log(
+          `Line${lineNumStr} payload: ${JSON.stringify(payload, null, 2)}`
+        );
+        registerLessonWithPayload(payload); // 定義はregisterLessons.gs
+      }
+      successRowIndexes.push(i);
+      Logger.log(`Line${lineNumStr} data is registered successfully.`);
+      showToast(`${lineNumStr}行目: 正常に登録されました`);
+      return ["⭕️", ""];
+    } catch (e) {
+      Logger.log(
+        `Line${lineNumStr} erred in registerRegularLessons:\n` + e.message
+      );
+      showToast(`${lineNumStr}行目: エラーが発生しました\n${e.message}`);
+      return ["✖️", e.message];
+    }
+  });
+  // 実行結果をスプシに反映する
+  const resultFirstRow = 5;
+  const resultFirstColumn = 11;
+  sheet
+    .getRange(
+      resultFirstRow, // row
+      resultFirstColumn, // column
+      results.length, // numRow
+      results[0].length // numColumn
+    )
+    .setValues(results);
+  Logger.log(`successRowIndexes: ` + JSON.stringify(successRowIndexes));
+  // 登録が成功した行の「登録する」のチェックを外す
+  for (row of successRowIndexes) {
+    sheet.getRange(row + resultFirstRow, 1, 1, 1).uncheck();
+  }
+}
+/**
+ * ユーザーが入力したレギュラー授業情報の値を読み取る関数
+ */
+function inputRegularLessonInfoList(sheet) {
+  // --- 必要に応じて書き換える ---
+  const inputFirstRow = 5;
+  const inputLastRow = Math.min(sheet.getLastRow(), inputFirstRow + 49); // 多くても50行に制限する
+  const inputFirstColumn = "A";
+  const inputLastColumn = "I";
+  // 指定したCellの値を読み取る
+  const inputValues = sheet
+    .getRange(
+      `${inputFirstColumn}${inputFirstRow}:${inputLastColumn}${inputLastRow}`
+    )
+    .getValues();
+  const inputLessonInfo = inputValues.map((value, i) => {
+    Logger.log(
+      `Input data (line${i + inputFirstRow}): ${JSON.stringify(value, null, 2)}`
+    );
+    // note以外のセルが全て入力されているかどうかを示すboolean
+    const isValid = value.slice(0, 8).every(Boolean);
+    return {
+      isValid: isValid,
+      registerInfo: {
+        shouldRegister: value[0],
+        studentName: value[1],
+        teacherName: value[2],
+        subjectName: value[3],
+        dayOfWeek: value[4],
+        comaDisplayedName: value[5],
+        startDate: value[6],
+        endDate: value[7],
+        note: value[8],
+      },
+    };
+  });
+  return inputLessonInfo;
+}
+function findFirstValidDate(reigsterInfo) {
+  const dayOfWeek = reigsterInfo.dayOfWeek;
+  const startDate = reigsterInfo.startDate;
+  const endDate = reigsterInfo.endDate;
+  // indexOf を使ってインデックスを取得する
+  const dayOfWeekIdx = DAY_OF_WEEK_LIST.indexOf(dayOfWeek[0]);
+  if (dayOfWeekIdx === -1) {
+    throw new Error("曜日の値が不適です");
+  }
+  const startDayIdx = startDate.getDay();
+  const diff = (7 + dayOfWeekIdx - startDayIdx) % 7;
+  const targetDate = new Date(startDate);
+  targetDate.setDate(startDate.getDate() + diff);
+  if (targetDate > endDate) {
+    Logger.log(
+      `validな日付がありません:\n[dayOfWeek] ${dayOfWeek}\n[startDate] ${startDate}\n[endDate] ${endDate}\n[targetDate] ${targetDate}`
+    );
+    return null;
+  }
+  return targetDate;
+}
+function resetRegisterSheetContent() {
+  const sheet = SpreadsheetApp.getActiveSpreadsheet().getSheetByName(
+    REGISTER_LESSONS_SHEET_NAME
+  );
+  const answer = confirm("現在のシート内容を全てリセットします。");
+  if (!answer) {
+    Logger.log("リセットをキャンセルしました。");
+    return;
+  }
+  const firstRow = 5;
+  const lastRow = sheet.getLastRow();
+  if (firstRow > lastRow) {
+    return;
+  }
+  const firstColumn = 1;
+  const lastColumn = sheet.getLastColumn();
+  sheet
+    .getRange(
+      firstRow,
+      firstColumn,
+      lastRow - firstRow + 1,
+      lastColumn - firstColumn + 1
+    )
+    .clearContent();
+}
+function resetRegularSheetContent() {
+  const sheet = SpreadsheetApp.getActiveSpreadsheet().getSheetByName(
+    REGISTER_REGULAR_LESSONS_SHEET_NAME
+  );
+  const answer = confirm("現在のシート内容を全てリセットします。");
+  if (!answer) {
+    Logger.log("リセットをキャンセルしました。");
+    return;
+  }
+  const firstRow = 5;
+  const lastRow = sheet.getLastRow();
+  if (firstRow > lastRow) {
+    return;
+  }
+  const firstColumn = 1;
+  const lastColumn = sheet.getLastColumn();
+  sheet
+    .getRange(
+      firstRow,
+      firstColumn,
+      lastRow - firstRow + 1,
+      lastColumn - firstColumn + 1
+    )
+    .clearContent();
+}
+function resetDeleteSheetContent() {
+  const sheet = SpreadsheetApp.getActiveSpreadsheet().getSheetByName(
+    DELETE_LESSONS_SHEET_NAME
+  );
+  const answer = confirm("現在のシート内容を全てリセットします。");
+  if (!answer) {
+    Logger.log("リセットをキャンセルしました。");
+    return;
+  }
+  // 検索項目部分をresetする
+  const inputRange = "B3:G3";
+  sheet.getRange(inputRange).clearContent();
+  // 検索結果の授業を削除する
+  const firstRow = 10;
+  const lastRow = sheet.getLastRow();
+  // checkboxを削除する
+  const maxRow = sheet.getMaxRows();
+  Logger.log(maxRow);
+  sheet.getRange(firstRow, 1, maxRow - firstRow + 1, 2).removeCheckboxes();
+  if (firstRow > lastRow) {
+    Logger.log("firstRow > lastRow のため実行を終了します。");
+    Logger.log(`fistRow: ${firstRow}, lastRow: ${lastRow}`);
+    return;
+  }
+  const firstColumn = 2;
+  const lastColumn = sheet.getLastColumn();
+  sheet
+    .getRange(
+      firstRow,
+      firstColumn,
+      lastRow - firstRow + 1,
+      lastColumn - firstColumn + 1
+    )
+    .clearContent();
+}
+function resetDetectLessonChangesSheetContent() {
+  const sheet = SpreadsheetApp.getActiveSpreadsheet().getSheetByName(
+    DETECT_LESSON_CHANGES_SHEET_NAME
+  );
+  const answer = confirm("現在のシート内容を全てリセットします。");
+  if (!answer) {
+    Logger.log("リセットをキャンセルしました。");
+    return;
+  }
+  const firstRow = 9;
+  const lastRow = sheet.getLastRow();
+  if (firstRow > lastRow) {
+    return;
+  }
+  const firstColumn = 1;
+  const lastColumn = sheet.getLastColumn();
+  sheet
+    .getRange(
+      firstRow,
+      firstColumn,
+      lastRow - firstRow + 1,
+      lastColumn - firstColumn + 1
+    )
+    .clearContent();
+}
+/**
+ * スプレッドシートが開かれた時に実行される関数
+ */
+function onOpen() {
+  const ui = SpreadsheetApp.getUi();
+  ui.createMenu("🛠 管理メニュー") // メニュー名
+    .addItem("トリガーを設定", "setupTriggers") // ボタン名と実行する関数名
+    .addToUi();
+}
+/**
+ * トリガーを自動で設定するスクリプト
+ * npm run push 実行時に自動で反映される
+ *
+ * [参考]
+ * https://developers.google.com/apps-script/reference/script/script-app?hl=ja#newtriggerfunctionname
+ *
+ * [使い方]
+ * setupTrigger内の
+ * ```ScriptApp.newTrigger("関数名") ... .create();```
+ * を追加・編集する
+ * トリガー一つにつき一行追加する
+ *
+ * 関数名はsrc以下の任意の.gs/.jsファイルに定義されている必要がある
+ *
+ * [例]
+ * 以下のように記述すると、myFunction関数を12時間ごとに実行するトリガーが作成される
+ * ScriptApp.newTrigger("myFunction").timeBased().everyHours(12).create();
+ *
+ * 以下のように記述すると、myFunction関数を毎日午前1時に実行するトリガーが作成される
+ * ScriptApp.newTrigger("myFunction").timeBased().atHour(1).everyDays(1).create();
+ *
+ * 以下のように記述すると、myFunction関数を特定のスプレッドシートのフォーム送信時に実行するトリガーが作成される
+ * ScriptApp.newTrigger('myFunction').forSpreadsheet(sheet).onFormSubmit().create();
+ */
+function setupTriggers() {
+  // ユーザーに確認を取る
+  if (!confirmSetupTriggers()) {
+    return;
+  }
+  // 既存のトリガーを削除
+  deleteTriggers();
+  // 各リストを12時間ごとに更新するトリガーを作成
+  ScriptApp.newTrigger("updateComaList").timeBased().everyHours(12).create();
+  ScriptApp.newTrigger("updateSubjectList").timeBased().everyHours(12).create();
+  ScriptApp.newTrigger("updateTeacherList").timeBased().everyHours(12).create();
+  ScriptApp.newTrigger("updateStudentList").timeBased().everyHours(12).create();
+}
+function confirmSetupTriggers() {
+  const ui = SpreadsheetApp.getUi();
+  const response = ui.alert(
+    "トリガーの設定を行います。既存のトリガーは全て削除されますが、よろしいですか？",
+    ui.ButtonSet.YES_NO
+  );
+  if (response === ui.Button.YES) {
+    ui.alert("トリガーの設定が完了しました。");
+    return true;
+  } else {
+    ui.alert("トリガーの設定がキャンセルされました。");
+    return false;
+  }
+}
+function deleteTriggers() {
+  const scriptTriggers = ScriptApp.getProjectTriggers();
+  for (const trigger of scriptTriggers) {
+    ScriptApp.deleteTrigger(trigger);
+  }
+}
+/**
+ * 複数ファイルにまたがって利用される (可能性がある) 汎用的な関数を定義しておくファイル。
+ *
+ * gasでは変数・定数のスコープ (参照できる範囲) がファイルで区切られていないので、
+ * 何もしなくても (特にimportなどしなくても) このファイルに定義した定数を別ファイルから呼び出せる。
+ */
+/**
+ * 画面上にprompt windowを表示させて確認を行う関数
+ */
+function confirm(message) {
+  const ui = SpreadsheetApp.getUi();
+  return ui.alert(message, ui.ButtonSet.YES_NO) === ui.Button.YES;
+}
+/**
+ * 画面上にメッセージを表示させる関数
+ */
+function alert(message) {
+  const ui = SpreadsheetApp.getUi();
+  ui.alert(message, ui.ButtonSet.OK);
+}
+/**
+ * toastを用いてメッセージを表示する関数
+ */
+function showToast(msg) {
+  const sheet = SpreadsheetApp.getActiveSpreadsheet();
+  sheet.toast(msg);
+}
+/**
+ * 入力されたDateオブジェクトから "yyyy-mm-dd" の文字列を取得する
+ */
+function formatDate(date) {
+  const formattedDate = new Intl.DateTimeFormat("ja-JP", {
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+    timeZone: "Asia/Tokyo",
+  })
+    .format(date)
+    .replaceAll("/", "-");
+  return formattedDate;
+}
+/**
+ * Pythonの range() のように、指定された範囲の連番配列を生成します。
+ *
+ * @param {number} start - 範囲の開始値。この引数のみが渡された場合は終了値として扱われ、開始値は0になります。
+ * @param {number} [stop] - 範囲の終了値（この値は含まない）。
+ * @param {number} [step=1] - 連番の増分。マイナスの値も指定可能です。
+ *
+ * @returns {number[]} 生成された数値の配列。
+ */
+function range(start, stop, step) {
+  // 1. 引数の整理
+  let actualStart = start;
+  let actualStop = stop;
+  let actualStep = step;
+  // 引数が1つだけの場合: range(stop)
+  if (actualStop === undefined) {
+    actualStop = actualStart;
+    actualStart = 0;
+  }
+  // 引数が1つだけor2つの場合: range(stop), range(start, stop)
+  if (actualStep === undefined) {
+    if (actualStart <= actualStop) {
+      actualStep = 1;
+    } else {
+      actualStep = -1;
+    }
+  }
+  // 2. エッジケースの処理
+  if (actualStep === 0) {
+    throw new Error(
+      "Error - range: range() の step 引数に 0 は指定できません。"
+    );
+  }
+  // 無効な範囲の場合は空の配列を返す
+  if (
+    (actualStep > 0 && actualStart >= actualStop) ||
+    (actualStep < 0 && actualStart <= actualStop)
+  ) {
+    return [];
+  }
+  // 3. Array.from を使った配列の生成
+  // 必要な要素の数を計算
+  const length = Math.ceil((actualStop - actualStart) / actualStep);
+  // Array.fromで配列を生成して返す
+  return Array.from({ length }, (_, i) => actualStart + i * actualStep);
+}
+/**
+ * 安全にurlを結合する関数。
+ *
+ * "https://example.com/" と "/api" のような文字列を結合する際に
+ * 間の "/" が重複しないように結合してくれる。
+ */
+function joinUrl(...parts) {
+  return parts
+    .map((part, i) => {
+      if (!part) return "";
+      if (i === 0) return part.replace(/\/+$/, ""); // 最初の部分は末尾の `/` を除去
+      return part.replace(/^\/+/, "").replace(/\/+$/, ""); // その他は前後の `/` を除去
+    })
+    .join("/");
+}
+/**
+ * Comiru APIの実行を簡単に行うためのhelper関数。
+ */
+function callComiruApi(method, url, payload = undefined) {
+  const scriptProperties = PropertiesService.getScriptProperties();
+  const token = scriptProperties.getProperty("COMIRU_TOKEN");
+  const options = {
+    method: method,
+    contentType: "application/json",
+    headers: {
+      Authorization: `Bearer ${token}`,
+      Accept: "application/json",
+    },
+    muteHttpExceptions: true,
+    // payloadの引数を受け取った場合のみ指定し、それ以外はundefinedにする
+    payload: payload ? JSON.stringify(payload) : undefined,
+  };
+  Logger.log(
+    `Calling Comiru API:\n[method]\t${method}\n[url]\t\t${url}\n[payload]\t${JSON.stringify(
+      payload,
+      null,
+      2
+    )}`
+  );
+  try {
+    const response = UrlFetchApp.fetch(url, options);
+    const responseBody = response.getContentText();
+    const parsedJson = JSON.parse(responseBody);
+    const responseCode = response.getResponseCode();
+    return [parsedJson, responseCode];
+  } catch (e) {
+    Logger.log("Error - callComiruApi: " + e.message);
+  }
+}
+/**
+ * GET メソッドで Comiru APIを実行する helper 関数
+ *
+ * payload がある場合はquery paramsに変更する必要がある。
+ */
+function callComiruGetApi(endpoint, payload = undefined) {
+  // GET method でpayloadが存在する場合は query parameterに変換する必要がある。
+  // query parameterは "?a=1&b=2&c=3" のような形になる必要がある。
+  const query = payload
+    ? "?" +
+      Object.entries(payload)
+        .map(([k, v]) => `${encodeURIComponent(k)}=${encodeURIComponent(v)}`)
+        .join("&")
+    : "";
+  // base_urlとendpointを結合し、必要があればqueryも付与する
+  const url = joinUrl(COMIRU_API_BASE_URL, endpoint) + query;
+  try {
+    return callComiruApi("get", url);
+  } catch (e) {
+    Logger.log("Error - callComiruGetApi: " + e.message);
+  }
+}
+/**
+ * POST メソッドで Comiru APIを実行する helper 関数
+ */
+function callComiruPostApi(endpoint, payload) {
+  // base_urlとendpointを結合する
+  const url = joinUrl(COMIRU_API_BASE_URL, endpoint);
+  try {
+    return callComiruApi("post", url, payload);
+  } catch (e) {
+    Logger.log("Error - callComiruPostApi: " + e.message);
+  }
+}
+/**
+ * DELETE メソッドで Comiru APIを実行する helper 関数
+ */
+function callComiruDeleteApi(endpoint, payload = undefined) {
+  // base_urlとendpointを結合する
+  const url = joinUrl(COMIRU_API_BASE_URL, endpoint);
+  try {
+    return callComiruApi("delete", url, payload);
+  } catch (e) {
+    Logger.log("Error - callComiruDeleteApi: " + e.message);
+  }
+}
+/**
+ * PUT メソッドで Comiru APIを実行する helper 関数
+ */
+function callComiruPutApi(endpoint, payload = undefined) {
+  // base_urlとendpointを結合する
+  const url = joinUrl(COMIRU_API_BASE_URL, endpoint);
+  try {
+    return callComiruApi("put", url, payload);
+  } catch (e) {
+    Logger.log("Error - callComiruPutApi: " + e.message);
+  }
+}

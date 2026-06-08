@@ -62,6 +62,28 @@ DATES = [
 ]
 
 
+def get_calendar_dates() -> list[str]:
+    conn = get_connection()
+    rows = conn.execute(
+        """
+        SELECT DISTINCT date
+        FROM (
+            SELECT date FROM assignments
+            UNION
+            SELECT date FROM teacher_availability
+            UNION
+            SELECT date FROM student_availability
+        )
+        WHERE date IS NOT NULL AND date != ''
+        ORDER BY date
+        """
+    ).fetchall()
+    conn.close()
+    if rows:
+        return [row["date"] for row in rows]
+    return DATES.copy()
+
+
 def get_connection() -> sqlite3.Connection:
     conn = sqlite3.connect(DB_PATH)
     conn.row_factory = sqlite3.Row
