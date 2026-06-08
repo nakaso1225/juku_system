@@ -112,34 +112,48 @@ function colorForStudentRef(ref) {
 }
 
 function groupDatesByWeek(dates) {
+  // dates: ISO文字列の配列（例: 2026-06-01）
   if (!dates || dates.length === 0) return [];
-  const weeks = [];
-  
-  // 最初の日付の曜日を取得
-  const firstDate = dates[0];
-  const [y, m, d] = firstDate.split("-").map(Number);
-  const firstDayOfWeek = new Date(y, m - 1, d).getDay();
-  
-  // 最初の週の前の空白を埋める
-  let currentWeek = new Array(firstDayOfWeek).fill(null);
-  let dateIndex = 0;
-  
-  while (dateIndex < dates.length) {
-    currentWeek.push(dates[dateIndex]);
-    dateIndex++;
-    
-    if (currentWeek.length === 7) {
-      weeks.push(currentWeek);
-      currentWeek = [];
-    }
+
+  // 元の存在する日付をSetにして扱いやすくする
+  const originalSet = new Set(dates);
+
+  // 最初と最後の日付を取得
+  const first = dates[0];
+  const last = dates[dates.length - 1];
+  const [fy, fm, fd] = first.split("-").map(Number);
+  const [ly, lm, ld] = last.split("-").map(Number);
+  const firstDate = new Date(fy, fm - 1, fd);
+  const lastDate = new Date(ly, lm - 1, ld);
+
+  // 最初の月曜に合わせる（getDay: 0=日曜, 1=月曜）
+  const firstDay = firstDate.getDay();
+  const daysToMonday = (firstDay + 6) % 7; // 日曜->6, 月曜->0, 火曜->1...
+  const startDate = new Date(firstDate);
+  startDate.setDate(firstDate.getDate() - daysToMonday);
+
+  // 最後の日曜に合わせる
+  const lastDay = lastDate.getDay();
+  const daysToSunday = (7 - lastDay) % 7; // 日曜->0, 土曜->1
+  const endDate = new Date(lastDate);
+  endDate.setDate(lastDate.getDate() + daysToSunday);
+
+  // 全日付を生成
+  const allDates = [];
+  for (let d = new Date(startDate); d <= endDate; d.setDate(d.getDate() + 1)) {
+    const y = d.getFullYear();
+    const m = d.getMonth() + 1;
+    const day = d.getDate();
+    const iso = `${y.toString().padStart(4, "0")}-${m.toString().padStart(2, "0")}-${day
+      .toString()
+      .padStart(2, "0")}`;
+    allDates.push(iso);
   }
-  
-  // 最後の週が不完全な場合、終わりまで埋める
-  if (currentWeek.length > 0) {
-    while (currentWeek.length < 7) {
-      currentWeek.push(null);
-    }
-    weeks.push(currentWeek);
+
+  // 7日ごとに分割して週配列を作る（各要素はISO日付文字列）
+  const weeks = [];
+  for (let i = 0; i < allDates.length; i += 7) {
+    weeks.push(allDates.slice(i, i + 7));
   }
 
   return weeks;
@@ -1553,7 +1567,7 @@ async function jumpToStudentFromTeacherPanel(studentName) {
   }
 }
 
-function buildAndAppendWeekTable(container, weekDates, periods, availabilitySet, assignmentMap, slotSummaryMap) {
+function buildAndAppendWeekTable(container, weekDates, periods, availabilitySet, assignmentMap, slotSummaryMap, originalDatesSet) {
   // Create week wrapper
   const weekWrapper = document.createElement("div");
   weekWrapper.className = "week-table-wrapper";
@@ -1568,13 +1582,38 @@ function buildAndAppendWeekTable(container, weekDates, periods, availabilitySet,
   const table = document.createElement("table");
   table.className = "week-timetable";
 
+  // 曜日ヘッダー行（例: 月 火 ...）
+  const weekdayRow = document.createElement("tr");
+  weekdayRow.className = "weekday-header-row";
+  const cornerWeek = document.createElement("th");
+  cornerWeek.className = "sticky-corner";
+  cornerWeek.textContent = "";
+  weekdayRow.appendChild(cornerWeek);
+  for (const date of weekDates) {
+    const th = document.createElement("th");
+    th.className = "weekday-cell";
+    if (date) {
+      const [y, m, d] = date.split("-").map(Number);
+      const dow = new Date(y, m - 1, d).getDay();
+      const labels = ["日", "月", "火", "水", "木", "金", "土"];
+      th.textContent = labels[dow];
+      if (dow === 6) th.classList.add("weekday-sat");
+      if (dow === 0) th.classList.add("weekday-sun");
+    } else {
+      th.textContent = "";
+    }
+    weekdayRow.appendChild(th);
+  }
+  table.appendChild(weekdayRow);
+
   // Header row with dates
   const headerRow = document.createElement("tr");
+  headerRow.className = "date-header-row";
+  headerRow.className = "date-header-row";
   const cornerHeader = document.createElement("th");
   cornerHeader.className = "sticky-corner";
   cornerHeader.textContent = "時限";
   headerRow.appendChild(cornerHeader);
-
   for (const date of weekDates) {
     const th = document.createElement("th");
     th.className = "date-header";
@@ -1595,8 +1634,9 @@ function buildAndAppendWeekTable(container, weekDates, periods, availabilitySet,
       const td = document.createElement("td");
       td.className = "cell";
 
-      // nullの場合は空欄
-      if (date === null) {
+      // カレンダーに存在しない日（元データになければグレーアウト）
+      const exists = originalDatesSet ? originalDatesSet.has(date) : true;
+      if (!exists) {
         td.classList.add("empty-day");
         td.textContent = "";
         tr.appendChild(td);
@@ -1718,6 +1758,7 @@ function renderGrid() {
   }
 
   // グループ化と状態を保存
+  state.calendarDateSet = new Set(dates || []);
   state.weeks = groupDatesByWeek(dates);
   if (state.currentWeekIndex >= state.weeks.length) {
     state.currentWeekIndex = 0;
@@ -1740,6 +1781,7 @@ function renderGrid() {
     if (state.currentWeekIndex > 0) {
       state.currentWeekIndex--;
       renderGrid();
+      renderTeacherGrid();
     }
   });
 
@@ -1750,6 +1792,7 @@ function renderGrid() {
     if (state.currentWeekIndex < state.weeks.length - 1) {
       state.currentWeekIndex++;
       renderGrid();
+      renderTeacherGrid();
     }
   });
 
@@ -1766,7 +1809,7 @@ function renderGrid() {
   // 現在の週だけをレンダリング
   if (state.weeks.length > 0) {
     const currentWeek = state.weeks[state.currentWeekIndex];
-    buildAndAppendWeekTable(container, currentWeek, periods, availabilitySet, assignmentMap, slotSummaryMap);
+    buildAndAppendWeekTable(container, currentWeek, periods, availabilitySet, assignmentMap, slotSummaryMap, state.calendarDateSet);
   }
 }
 
@@ -1906,7 +1949,7 @@ async function selectTeacherFromDropdown(teacher) {
   renderTeacherPanel();
 }
 
-function buildAndAppendTeacherWeekTable(container, weekDates, periods, panel) {
+function buildAndAppendTeacherWeekTable(container, weekDates, periods, panel, originalDatesSet) {
   // Create week wrapper
   const weekWrapper = document.createElement("div");
   weekWrapper.className = "week-table-wrapper";
@@ -1935,13 +1978,34 @@ function buildAndAppendTeacherWeekTable(container, weekDates, periods, panel) {
   const table = document.createElement("table");
   table.className = "week-timetable";
 
+  // 曜日ヘッダー行
+  const weekdayRow = document.createElement("tr");
+  weekdayRow.className = "weekday-header-row";
+  const cornerWeek = document.createElement("th");
+  cornerWeek.className = "sticky-corner";
+  cornerWeek.textContent = "";
+  weekdayRow.appendChild(cornerWeek);
+  for (const date of weekDates) {
+    const th = document.createElement("th");
+    th.className = "weekday-cell";
+    if (date) {
+      const [y, m, d] = date.split("-").map(Number);
+      const dow = new Date(y, m - 1, d).getDay();
+      const labels = ["日", "月", "火", "水", "木", "金", "土"];
+      th.textContent = labels[dow];
+      if (dow === 6) th.classList.add("weekday-sat");
+      if (dow === 0) th.classList.add("weekday-sun");
+    }
+    weekdayRow.appendChild(th);
+  }
+  table.appendChild(weekdayRow);
+
   // Header row with dates
   const headerRow = document.createElement("tr");
   const cornerHeader = document.createElement("th");
   cornerHeader.className = "sticky-corner";
   cornerHeader.textContent = "時限";
   headerRow.appendChild(cornerHeader);
-
   for (const date of weekDates) {
     const th = document.createElement("th");
     th.className = "date-header";
@@ -1962,8 +2026,9 @@ function buildAndAppendTeacherWeekTable(container, weekDates, periods, panel) {
       const td = document.createElement("td");
       td.className = "teacher-cell";
 
-      // nullの場合は空欄
-      if (date === null) {
+      // 元データにない日付は空にする
+      const exists = originalDatesSet ? originalDatesSet.has(date) : true;
+      if (!exists) {
         td.classList.add("empty-day");
         td.textContent = "";
         tr.appendChild(td);
@@ -2029,6 +2094,7 @@ function renderTeacherGrid() {
   
   // ナビゲーションボタンを追加（同じweeks状態を使用）
   if (!state.weeks || state.weeks.length === 0) {
+    state.calendarDateSet = new Set(dates || []);
     state.weeks = groupDatesByWeek(dates);
   }
   
@@ -2046,6 +2112,7 @@ function renderTeacherGrid() {
     if (state.currentWeekIndex > 0) {
       state.currentWeekIndex--;
       renderTeacherGrid();
+      renderGrid();
     }
   });
 
@@ -2056,6 +2123,7 @@ function renderTeacherGrid() {
     if (state.currentWeekIndex < state.weeks.length - 1) {
       state.currentWeekIndex++;
       renderTeacherGrid();
+      renderGrid();
     }
   });
 
@@ -2072,7 +2140,7 @@ function renderTeacherGrid() {
   // 現在の週だけをレンダリング
   if (state.weeks.length > 0) {
     const currentWeek = state.weeks[state.currentWeekIndex];
-    buildAndAppendTeacherWeekTable(container, currentWeek, periods, panel);
+    buildAndAppendTeacherWeekTable(container, currentWeek, periods, panel, state.calendarDateSet);
   }
 }
 

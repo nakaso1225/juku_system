@@ -8,6 +8,7 @@
   --subject: #d6f1eb;
   --other: #eef2f1;
   --danger: #a81f2d;
+  --weekday-header-height: 28px;
 }
 
 body {
@@ -679,13 +680,34 @@ button {
   letter-spacing: 0.02em;
 }
 
-#timetable .date-header-row th,
-#teacher-timetable .date-header-row th {
+#timetable .weekday-header-row th,
+#teacher-timetable .weekday-header-row th {
   position: sticky;
   top: var(--month-header-height);
   z-index: 3;
+  height: var(--weekday-header-height);
+  background: #f3f6f5;
+  font-weight: 700;
+}
+
+#timetable .date-header-row th,
+#teacher-timetable .date-header-row th {
+  position: sticky;
+  top: calc(var(--month-header-height) + var(--weekday-header-height));
+  z-index: 2;
   height: var(--date-header-height);
   background: #f6f8f7;
+}
+
+.weekday-cell {
+  font-size: 12px;
+  color: var(--muted);
+}
+.weekday-sat {
+  color: #1e40af; /* blue-ish */
+}
+.weekday-sun {
+  color: #b91c1c; /* red-ish */
 }
 
 #timetable .sticky-corner,
