@@ -1104,6 +1104,7 @@ button {
   background: rgba(0, 0, 0, 0.28);
   display: grid;
   place-items: center;
+  z-index: 5000; /* Ensure modal appears above sticky headers and week tables */
 }
 
 .modal-content {
@@ -1112,6 +1113,7 @@ button {
   border-radius: 12px;
   border: 1px solid var(--line);
   padding: 14px;
+  z-index: 5001;
 }
 
 .modal-title {
