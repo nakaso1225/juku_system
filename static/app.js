@@ -31,6 +31,7 @@ let activeStudentOptionIndex = -1;
 let teacherDropdownOptions = [];
 let activeTeacherOptionIndex = -1;
 let dragState = null;
+let suppressTeacherModalUntil = 0;
 const dragTeacherCache = new Map();
 const assignmentUndoStack = [];
 const assignmentRedoStack = [];
@@ -39,6 +40,14 @@ const TAB_ID_KEY = "juku_scheduler_tab_id";
 const STUDENT_STATUS_ADJUSTING = "調整中";
 const STUDENT_STATUS_NEEDS_ADJUSTMENT = "要調整";
 const STUDENT_STATUS_COMPLETE = "完了";
+
+function shouldSuppressTeacherModal() {
+  return Date.now() < suppressTeacherModalUntil;
+}
+
+function suppressTeacherModal(ms = 500) {
+  suppressTeacherModalUntil = Date.now() + ms;
+}
 
 const subjectAbbrevRules = [
   [/物理/, "物"],
@@ -1224,6 +1233,63 @@ function clearDragHoverCell() {
   dragState.hoverCell.classList.remove("drag-drop-ok", "drag-drop-warn", "drag-drop-no");
 }
 
+function getWeekNavDirectionFromPoint(clientX, clientY) {
+  const els = document.elementsFromPoint(clientX, clientY);
+  const nav = els.find(
+    (el) => el instanceof HTMLElement && el.dataset && el.dataset.weekNavDir
+  );
+  return nav ? nav.dataset.weekNavDir : null;
+}
+
+function tryNavigateWeekByDrag(direction) {
+  if (!state.weeks || !state.weeks.length) return false;
+  const prevIndex = state.currentWeekIndex;
+  if (direction === "prev" && state.currentWeekIndex > 0) {
+    state.currentWeekIndex -= 1;
+  } else if (direction === "next" && state.currentWeekIndex < state.weeks.length - 1) {
+    state.currentWeekIndex += 1;
+  }
+  if (state.currentWeekIndex === prevIndex) return false;
+
+  renderGrid();
+  renderTeacherGrid();
+  return true;
+}
+
+function clearDragTeacherBlockedCells() {
+  document
+    .querySelectorAll(".cell.drag-teacher-blocked")
+    .forEach((cell) => cell.classList.remove("drag-teacher-blocked"));
+}
+
+function markDragTeacherBlockedCells() {
+  clearDragTeacherBlockedCells();
+  if (!dragState || !dragState.teacherCache) return;
+
+  const teacherAvailability = dragState.teacherCache.availability;
+  if (!teacherAvailability) return;
+
+  const cells = document.querySelectorAll(".cell[data-date][data-period]");
+  cells.forEach((cell) => {
+    if (
+      cell.classList.contains("unavailable") ||
+      cell.classList.contains("no-teacher") ||
+      cell.classList.contains("no-candidate") ||
+      cell.classList.contains("empty-day") ||
+      cell.classList.contains("slot-full")
+    ) {
+      return;
+    }
+    const date = String(cell.dataset.date || "");
+    const period = Number(cell.dataset.period || 0);
+    if (!date || !period) return;
+    const slot = slotKey(date, period);
+    if (!teacherAvailability.has(slot)) {
+      cell.classList.add("drag-teacher-blocked");
+    }
+  });
+}
+
 function getCellFromPoint(clientX, clientY) {
   const els = document.elementsFromPoint(clientX, clientY);
   return (
@@ -1303,6 +1369,7 @@ function startDragCommon(pair, sourceAssignmentId, clientX, clientY) {
     startX: clientX,
     startY: clientY,
     moved: false,
+    lastNavDirection: null,
   };
 
   document.addEventListener("pointermove", handleDragPointerMove);
@@ -1314,6 +1381,7 @@ async function startDragFromPalette(pair, clientX, clientY) {
   startDragCommon(pair, null, clientX, clientY);
   try {
     dragState.teacherCache = await ensureDragTeacherCache(pair.teacher_id);
+    markDragTeacherBlockedCells();
   } catch (err) {
     cancelDragState();
     showFlash(`講師情報の取得失敗: ${err.message}`, "error");
@@ -1330,6 +1398,7 @@ async function startDragFromAssignment(assignment, clientX, clientY) {
   startDragCommon(pair, assignment.id, clientX, clientY);
   try {
     dragState.teacherCache = await ensureDragTeacherCache(pair.teacher_id);
+    markDragTeacherBlockedCells();
   } catch (err) {
     cancelDragState();
     showFlash(`講師情報の取得失敗: ${err.message}`, "error");
@@ -1342,6 +1411,19 @@ function handleDragPointerMove(e) {
   dragState.ghost.style.top = `${e.clientY}px`;
   if (Math.abs(e.clientX - dragState.startX) > 4 || Math.abs(e.clientY - dragState.startY) > 4) {
     dragState.moved = true;
+  }
+
+  const navDirection = getWeekNavDirectionFromPoint(e.clientX, e.clientY);
+  if (navDirection) {
+    if (dragState.lastNavDirection !== navDirection) {
+      dragState.lastNavDirection = navDirection;
+      const movedWeek = tryNavigateWeekByDrag(navDirection);
+      if (movedWeek) {
+        markDragTeacherBlockedCells();
+      }
+    }
+  } else {
+    dragState.lastNavDirection = null;
   }
 
   const cell = getCellFromPoint(e.clientX, e.clientY);
@@ -1358,6 +1440,7 @@ function handleDragPointerMove(e) {
 function cancelDragState() {
   if (!dragState) return;
   clearDragHoverCell();
+  clearDragTeacherBlockedCells();
   document.removeEventListener("pointermove", handleDragPointerMove);
   if (dragState.ghost) dragState.ghost.remove();
   dragState = null;
@@ -1371,14 +1454,10 @@ async function handleDragPointerUp(e) {
   cancelDragState();
 
   try {
+    suppressTeacherModal(500);
+
     if (!cell) return;
-    if (!current.moved && current.sourceAssignmentId) {
-      const source = getTimetableAssignments().find((a) => a.id === current.sourceAssignmentId);
-      if (source) {
-        await openTeacherModal(source.date, source.period, source);
-      }
-      return;
-    }
+    if (!current.moved) return;
 
     if (!result || !result.ok) {
       showFlash(`配置不可: ${result ? result.reason : "不明"}`, "error");
@@ -1394,7 +1473,9 @@ async function handleDragPointerUp(e) {
     if (current.sourceAssignmentId) {
       const source = getTimetableAssignments().find((a) => a.id === current.sourceAssignmentId);
       if (!source) return;
-      if (source.date === result.date && Number(source.period) === Number(result.period)) return;
+      if (source.date === result.date && Number(source.period) === Number(result.period)) {
+        return;
+      }
 
       const before = toAssignmentSnapshot(source);
       const created = await api("/api/assignments", {
@@ -1776,6 +1857,7 @@ function renderGrid() {
 
   const prevBtn = document.createElement("button");
   prevBtn.className = "btn-secondary";
+  prevBtn.dataset.weekNavDir = "prev";
   prevBtn.textContent = "< 前の週";
   prevBtn.addEventListener("click", () => {
     if (state.currentWeekIndex > 0) {
@@ -1787,6 +1869,7 @@ function renderGrid() {
 
   const nextBtn = document.createElement("button");
   nextBtn.className = "btn-secondary";
+  nextBtn.dataset.weekNavDir = "next";
   nextBtn.textContent = "次の週 >";
   nextBtn.addEventListener("click", () => {
     if (state.currentWeekIndex < state.weeks.length - 1) {
@@ -2044,6 +2127,8 @@ function buildAndAppendTeacherWeekTable(container, weekDates, periods, panel, or
           td.classList.add("conflict");
         }
         td.innerHTML = "";
+        const content = document.createElement("div");
+        content.className = "teacher-cell-content";
         entries.forEach((entry, idx) => {
           const student = (state.students || []).find((s) => s.name === entry.student_name);
           const c = colorForStudentRef(student ? student.id : entry.student_name);
@@ -2060,14 +2145,15 @@ function buildAndAppendTeacherWeekTable(container, weekDates, periods, panel, or
           btn.addEventListener("click", async () => {
             await jumpToStudentFromTeacherPanel(entry.student_name);
           });
-          td.appendChild(btn);
+          content.appendChild(btn);
           if (idx < entries.length - 1) {
             const sep = document.createElement("span");
             sep.className = "teacher-cell-sep";
             sep.textContent = " / ";
-            td.appendChild(sep);
+            content.appendChild(sep);
           }
         });
+        td.appendChild(content);
       } else if (!available) {
         td.classList.add("unavailable");
         td.textContent = "×";
@@ -2107,6 +2193,7 @@ function renderTeacherGrid() {
 
   const prevBtn = document.createElement("button");
   prevBtn.className = "btn-secondary";
+  prevBtn.dataset.weekNavDir = "prev";
   prevBtn.textContent = "< 前の週";
   prevBtn.addEventListener("click", () => {
     if (state.currentWeekIndex > 0) {
@@ -2118,6 +2205,7 @@ function renderTeacherGrid() {
 
   const nextBtn = document.createElement("button");
   nextBtn.className = "btn-secondary";
+  nextBtn.dataset.weekNavDir = "next";
   nextBtn.textContent = "次の週 >";
   nextBtn.addEventListener("click", () => {
     if (state.currentWeekIndex < state.weeks.length - 1) {
@@ -2173,6 +2261,7 @@ function updateTeacherPlaceholder() {
 }
 
 async function openTeacherModal(date, period, existingAssignment) {
+  if (shouldSuppressTeacherModal()) return;
   state.selectedSlot = { date, period, existingAssignment };
 
   const modal = document.getElementById("teacher-modal");
@@ -2222,7 +2311,17 @@ async function openTeacherModal(date, period, existingAssignment) {
     )}&student_id=${state.selectedStudentId}`
   );
 
+  const uniqueTeachers = [];
+  const seenTeacherIds = new Set();
+
   for (const teacher of teachers) {
+    const key = teacher.teacher_id;
+    if (seenTeacherIds.has(key)) continue;
+    seenTeacherIds.add(key);
+    uniqueTeachers.push(teacher);
+  }
+
+  for (const teacher of uniqueTeachers) {
     const btn = document.createElement("button");
     btn.className = "teacher-item";
     if (teacher.has_conflict) btn.classList.add("conflict");

@@ -3,6 +3,7 @@ from __future__ import annotations
 import sqlite3
 import random
 from pathlib import Path
+from datetime import date, timedelta
 
 DB_PATH = Path(__file__).resolve().parent / "juku.db"
 
@@ -47,40 +48,16 @@ PERIOD_LABELS = {
 }
 TABLE_IDS = list("ABCDEFGHIJK")
 
-DATES = [
-    "2026-03-26",
-    "2026-03-27",
-    "2026-03-28",
-    "2026-03-30",
-    "2026-03-31",
-    "2026-04-01",
-    "2026-04-02",
-    "2026-04-03",
-    "2026-04-04",
-    "2026-04-06",
-    "2026-04-07",
-]
+CALENDAR_START = date(2026, 7, 6)
+CALENDAR_END = date(2026, 8, 30)
+DATES = []
+current = CALENDAR_START
+while current <= CALENDAR_END:
+    DATES.append(current.isoformat())
+    current += timedelta(days=1)
 
 
 def get_calendar_dates() -> list[str]:
-    conn = get_connection()
-    rows = conn.execute(
-        """
-        SELECT DISTINCT date
-        FROM (
-            SELECT date FROM assignments
-            UNION
-            SELECT date FROM teacher_availability
-            UNION
-            SELECT date FROM student_availability
-        )
-        WHERE date IS NOT NULL AND date != ''
-        ORDER BY date
-        """
-    ).fetchall()
-    conn.close()
-    if rows:
-        return [row["date"] for row in rows]
     return DATES.copy()
 
 

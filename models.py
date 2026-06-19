@@ -368,6 +368,7 @@ def get_available_teachers(
               AND a.student_id != ?
             GROUP BY a.teacher_id
         ) slot ON slot.teacher_id = t.id
+        GROUP BY t.id
         ORDER BY availability_count ASC,
                  assignment_count DESC,
                  CASE
@@ -1090,8 +1091,8 @@ def _validate_teacher_header(header: list[str]) -> None:
         raise ValueError("ヘッダー列数が不足しています（最低4列必要）")
 
     joined = "".join(header)
-    if "講師名" not in joined:
-        raise ValueError("ヘッダーに講師名列が見つかりません")
+    if "講師名" not in joined and "氏名" not in joined:
+        raise ValueError("ヘッダーに講師名または氏名列が見つかりません")
     if "指導可能科目" not in joined:
         raise ValueError("ヘッダーに指導可能科目列が見つかりません")
 
@@ -1564,73 +1565,17 @@ def _import_students_records(records: list[list[str]]) -> ImportResult:
 
 
 def import_students(data_dir: Path) -> ImportResult:
-    try:
-        from openpyxl import load_workbook
-    except ModuleNotFoundError as exc:
-        raise ModuleNotFoundError("openpyxl が未インストールです") from exc
-
-    files = sorted((data_dir / "students").glob("*.xlsx"))
-    if not files:
-        raise FileNotFoundError("data/students/*.xlsx が見つかりません")
-
-    conn = get_connection()
-    cur = conn.cursor()
-
-    student_count = 0
-    availability_rows = 0
-
-    for path in files:
-        student_name = path.stem.strip()
-
-        cur.execute(
-            """
-            INSERT INTO students(name)
-            VALUES (?)
-            ON CONFLICT(name)
-            DO NOTHING
-            """,
-            (student_name,),
-        )
-        student_id = cur.execute(
-            "SELECT id FROM students WHERE name = ?", (student_name,)
-        ).fetchone()[0]
-
-        cur.execute("DELETE FROM student_availability WHERE student_id = ?", (student_id,))
-
-        wb = load_workbook(path, data_only=True)
-        ws = wb[wb.sheetnames[0]]
-
-        date_columns = _extract_date_columns_from_sheet(ws)
-        rows_to_insert = []
-        for col, date in date_columns.items():
-            for row in range(7, 13):
-                period_val = ws.cell(row=row, column=2).value
-                try:
-                    period = int(period_val)
-                except (TypeError, ValueError):
-                    period = row - 5
-                if period not in PERIODS:
-                    continue
-                cell_val = ws.cell(row=row, column=col).value
-                if _student_cell_is_available(cell_val):
-                    rows_to_insert.append((student_id, date, period))
-
-        cur.executemany(
-            """
-            INSERT OR IGNORE INTO student_availability(student_id, date, period)
-            VALUES (?, ?, ?)
-            """,
-            rows_to_insert,
-        )
-
-        student_count += 1
-        availability_rows += len(rows_to_insert)
-
-    _apply_auto_student_status_rules(conn)
-    conn.commit()
-    conn.close()
-
-    return ImportResult(students=student_count, availability_rows=availability_rows)
+    students_dir = data_dir / "students"
+    candidates = []
+    for pattern in ("*.csv", "*.xlsx", "*.xlsm"):
+        candidates.extend(students_dir.glob(pattern))
+    if not candidates:
+        raise FileNotFoundError("data/students に CSV/XLSX が見つかりません")
+    latest = max(candidates, key=lambda p: p.stat().st_mtime)
+    suffix = latest.suffix.lower()
+    if suffix == ".csv":
+        return _import_students_records(_records_from_csv_bytes(latest.read_bytes()))
+    return _import_students_from_xlsx(latest)
 
 
 def _extract_date_columns_from_sheet(ws) -> dict[int, str]:
