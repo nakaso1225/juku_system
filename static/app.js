@@ -176,6 +176,18 @@ function formatDate(isoDate) {
   return `${d.getMonth() + 1}/${d.getDate()}(${week})`;
 }
 
+function weekRangeLabel(weekDates) {
+  if (!weekDates || weekDates.length === 0) return "";
+  const validDates = weekDates.filter(d => d !== null);
+  if (validDates.length === 0) return "";
+  const first = validDates[0];
+  const last = validDates[validDates.length - 1];
+  const [, sm, sd] = first.split("-").map(Number);
+  const [, em, ed] = last.split("-").map(Number);
+  if (sm === em) return `${sm}/${sd}〜${ed}`;
+  return `${sm}/${sd}〜${em}/${ed}`;
+}
+
 function buildWeekHeader(weekDates) {
   const validDates = weekDates.filter(d => d !== null);
   if (validDates.length === 0) return "";
@@ -954,7 +966,7 @@ function showFlash(message, type = "info") {
   const el = document.getElementById("flash-message");
   if (!el) return;
   el.textContent = message;
-  el.classList.remove("hidden", "error");
+  el.classList.remove("flash-empty", "error");
   if (type === "error") el.classList.add("error");
   if (flashTimer) {
     clearTimeout(flashTimer);
@@ -1882,7 +1894,6 @@ function renderGrid() {
   const weekInfo = document.createElement("span");
   weekInfo.style.fontSize = "14px";
   weekInfo.style.color = "var(--muted)";
-  weekInfo.textContent = `第 ${state.currentWeekIndex + 1} 週`;
 
   navBar.appendChild(prevBtn);
   navBar.appendChild(weekInfo);
@@ -1892,6 +1903,7 @@ function renderGrid() {
   // 現在の週だけをレンダリング
   if (state.weeks.length > 0) {
     const currentWeek = state.weeks[state.currentWeekIndex];
+    weekInfo.textContent = `第${state.currentWeekIndex + 1}週 ${weekRangeLabel(currentWeek)}`;
     buildAndAppendWeekTable(container, currentWeek, periods, availabilitySet, assignmentMap, slotSummaryMap, state.calendarDateSet);
   }
 }
@@ -2218,7 +2230,6 @@ function renderTeacherGrid() {
   const weekInfo = document.createElement("span");
   weekInfo.style.fontSize = "14px";
   weekInfo.style.color = "var(--muted)";
-  weekInfo.textContent = `第 ${state.currentWeekIndex + 1} 週`;
 
   navBar.appendChild(prevBtn);
   navBar.appendChild(weekInfo);
@@ -2228,6 +2239,7 @@ function renderTeacherGrid() {
   // 現在の週だけをレンダリング
   if (state.weeks.length > 0) {
     const currentWeek = state.weeks[state.currentWeekIndex];
+    weekInfo.textContent = `第${state.currentWeekIndex + 1}週 ${weekRangeLabel(currentWeek)}`;
     buildAndAppendTeacherWeekTable(container, currentWeek, periods, panel, state.calendarDateSet);
   }
 }

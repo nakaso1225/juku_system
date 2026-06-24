@@ -1,7 +1,7 @@
 :root {
-  --bg: #f7f7f4;
+  --bg: #f4f6f5;
   --panel: #ffffff;
-  --line: #d5d9d6;
+  --line: #dde2df;
   --text: #18211f;
   --muted: #54625d;
   --accent: #146b5a;
@@ -9,30 +9,36 @@
   --other: #eef2f1;
   --danger: #a81f2d;
   --weekday-header-height: 28px;
+  --shadow-sm: 0 1px 4px rgba(0,0,0,0.07), 0 0 0 1px rgba(0,0,0,0.04);
+  --shadow-md: 0 4px 12px rgba(0,0,0,0.09), 0 0 0 1px rgba(0,0,0,0.04);
+  --radius: 12px;
 }
 
 body {
   margin: 0;
   font-family: "Noto Sans JP", "Hiragino Kaku Gothic ProN", sans-serif;
-  background: radial-gradient(circle at top left, #ffffff 0%, var(--bg) 55%);
+  background: var(--bg);
   color: var(--text);
 }
 
 .container {
   max-width: 1200px;
   margin: 0 auto;
-  padding: 16px;
+  padding: 20px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
 }
 
 /* ===================================================================
    第1層: ツールバー（常時表示の主操作エリア）
-   — 生徒選択・科目選択のみ。コンパクトに。
    =================================================================== */
 .toolbar {
   background: var(--panel);
-  border: 1px solid var(--line);
-  border-radius: 10px;
-  padding: 12px;
+  border: none;
+  border-radius: var(--radius);
+  padding: 14px 16px;
+  box-shadow: var(--shadow-sm);
 }
 
 .row {
@@ -43,35 +49,38 @@ body {
 }
 
 .btn-secondary {
-  border: 1px solid #bfc8c4;
+  border: 1px solid #cfd8d3;
   border-radius: 8px;
-  padding: 6px 10px;
-  background: #f7fbf9;
+  padding: 7px 14px;
+  background: #fff;
   color: #2f4840;
   cursor: pointer;
   font-size: 13px;
+  font-weight: 500;
+  box-shadow: 0 1px 3px rgba(0,0,0,0.07);
+  transition: box-shadow 0.15s, background 0.15s;
 }
 
 .btn-secondary:hover {
   background: #eaf5f0;
+  box-shadow: 0 2px 6px rgba(0,0,0,0.11);
 }
 
 /* ===================================================================
    コンテキストバー（ツールバー直下、グリッド直前）
    =================================================================== */
 .context-bar {
-  margin-top: 10px;
   display: flex;
   align-items: center;
   flex-wrap: wrap;
   gap: 2px 8px;
-  border: 1px solid #b9d6cb;
-  background: #e7f5ef;
+  border: none;
+  background: #e2f4ed;
   color: #143b31;
-  border-radius: 10px;
-  padding: 8px 12px;
+  border-radius: var(--radius);
+  padding: 10px 16px;
   font-weight: 700;
-  box-shadow: 0 2px 6px rgba(0, 0, 0, 0.06);
+  box-shadow: var(--shadow-sm);
 }
 
 .context-student {
@@ -97,11 +106,11 @@ body {
 
 /* ====== 講師パレット ====== */
 .palette-section {
-  margin-top: 10px;
   background: var(--panel);
-  border: 1px solid var(--line);
-  border-radius: 10px;
-  padding: 10px 12px;
+  border: none;
+  border-radius: var(--radius);
+  padding: 12px 16px;
+  box-shadow: var(--shadow-sm);
 }
 
 .palette-label {
@@ -159,16 +168,17 @@ body {
    折りたたみセクション共通
    =================================================================== */
 .collapsible-section {
-  margin-top: 10px;
+  border-radius: var(--radius);
+  box-shadow: var(--shadow-sm);
+  overflow: hidden;
 }
 
 .collapsible-toggle {
   width: 100%;
   text-align: left;
   background: var(--panel);
-  border: 1px solid var(--line);
-  border-radius: 10px;
-  padding: 10px 14px;
+  border: none;
+  padding: 12px 16px;
   font-size: 14px;
   font-weight: 600;
   color: #2f4840;
@@ -180,7 +190,7 @@ body {
 }
 
 .collapsible-toggle:hover {
-  background: #f2f7f5;
+  background: #f4f8f6;
 }
 
 .toggle-icon {
@@ -192,12 +202,10 @@ body {
 }
 
 .collapsible-body {
-  border: 1px solid var(--line);
-  border-top: none;
-  border-radius: 0 0 10px 10px;
+  border-top: 1px solid var(--line);
+  border-radius: 0 0 var(--radius) var(--radius);
   background: var(--panel);
-  padding: 12px;
-  margin-top: -1px;
+  padding: 14px 16px;
 }
 
 /* ====== 事務メモパネル（折りたたみ内） ====== */
@@ -549,20 +557,47 @@ body {
    =================================================================== */
 select,
 button {
-  border: 1px solid #bfc8c4;
+  border: 1px solid #cfd8d3;
   border-radius: 8px;
-  padding: 6px 10px;
+  padding: 7px 12px;
   background: #fff;
+  font-family: inherit;
+  font-size: 13px;
+}
+
+select {
+  box-shadow: 0 1px 3px rgba(0,0,0,0.06);
+  cursor: pointer;
+}
+
+button {
+  cursor: pointer;
+  font-weight: 500;
+  box-shadow: 0 1px 3px rgba(0,0,0,0.07);
+  transition: box-shadow 0.15s, background 0.15s;
+}
+
+button:hover {
+  box-shadow: 0 2px 6px rgba(0,0,0,0.11);
 }
 
 .flash {
-  margin-top: 8px;
-  padding: 8px 10px;
+  margin-top: 6px;
+  padding: 7px 12px;
   border-radius: 8px;
   border: 1px solid #c7d6d0;
   background: #eef7f3;
   color: #22443a;
   font-size: 13px;
+  font-weight: 500;
+  min-height: 34px;
+  box-sizing: border-box;
+}
+
+.flash.flash-empty {
+  visibility: hidden;
+  border-color: transparent;
+  background: transparent;
 }
 
 .flash.error {
@@ -607,12 +642,12 @@ button {
    コンフリクトバー
    =================================================================== */
 .conflict-bar {
-  margin-top: 10px;
-  border: 1px solid #f1b2b7;
+  border: none;
   background: #fff0f2;
   color: #7b1520;
-  border-radius: 10px;
-  padding: 10px;
+  border-radius: var(--radius);
+  padding: 12px 16px;
+  box-shadow: 0 0 0 1px #f1b2b7, var(--shadow-sm);
 }
 
 .conflict-line {
@@ -637,11 +672,11 @@ button {
    メイングリッド
    =================================================================== */
 .grid-wrap {
-  margin-top: 12px;
   overflow-x: auto;
-  border: 1px solid var(--line);
-  border-radius: 10px;
+  border: none;
+  border-radius: var(--radius);
   background: var(--panel);
+  box-shadow: var(--shadow-md);
 }
 
 #timetable {
@@ -1019,20 +1054,21 @@ button {
    講師パネル
    =================================================================== */
 .teacher-panel {
-  margin-top: 14px;
-  border: 1px solid var(--line);
-  border-radius: 10px;
+  border: none;
+  border-radius: var(--radius);
   background: var(--panel);
-  padding: 12px;
+  padding: 14px 16px;
+  box-shadow: var(--shadow-sm);
 }
 
 .teacher-panel-toggle {
   width: 100%;
   text-align: left;
-  background: #f2f7f5;
-  border: 1px solid #c8d4cf;
+  background: #f4f8f6;
+  border: 1px solid #ccd8d2;
   color: #22443a;
   font-weight: 600;
+  border-radius: 8px;
 }
 
 .teacher-panel-body {
@@ -1225,6 +1261,15 @@ button {
     --month-header-height: 34px;
     --date-header-height: 38px;
   }
+}
+
+/* ===================================================================
+   週ナビバー
+   =================================================================== */
+.week-nav-bar {
+  padding: 10px 14px;
+  background: #f6f9f7;
+  border-bottom: 1px solid var(--line);
 }
 
 /* ===================================================================
