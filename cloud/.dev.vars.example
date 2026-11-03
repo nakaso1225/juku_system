@@ -1,0 +1,8 @@
+# ローカル開発用。このファイルを .dev.vars にコピーして使う（.dev.vars は git に入れない）
+GOOGLE_CLIENT_ID=
+GOOGLE_CLIENT_SECRET=
+SESSION_SECRET=ローカル用の長いランダム文字列
+# 最初の事務アカウント（カンマ区切り）。あとは管理画面から追加できる
+ADMIN_EMAILS=admin@example.com
+# 1 にすると Google を使わずにログインできる（ローカル専用。本番では絶対に設定しない）
+DEV_LOGIN=1

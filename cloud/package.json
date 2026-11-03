@@ -1,0 +1,21 @@
+{
+  "name": "juku-scheduler-cloud",
+  "version": "1.0.0",
+  "scripts": {
+    "dev": "wrangler dev",
+    "db:migrate:local": "wrangler d1 migrations apply juku-scheduler --local",
+    "db:migrate:remote": "wrangler d1 migrations apply juku-scheduler --remote",
+    "deploy": "wrangler deploy",
+    "typecheck": "tsc"
+  },
+  "description": "塾の講習スケジュール（Cloudflare版）",
+  "devDependencies": {
+    "@cloudflare/workers-types": "^4.20260702.1",
+    "typescript": "^7.0.2",
+    "wrangler": "^4.86.0"
+  },
+  "dependencies": {
+    "hono": "^4.13.16"
+  },
+  "private": true
+}

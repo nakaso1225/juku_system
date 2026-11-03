@@ -1,0 +1,50 @@
+import { Hono } from "hono";
+import { adminApi, isStaff } from "./admin";
+import { auth } from "./auth";
+import { ALL_PERIODS, periodLabel, SUBJECTS } from "./constants";
+import { readSession } from "./session";
+import { findTeacherBySub, teacherApi } from "./teacher";
+import { HttpError } from "./terms";
+import type { AppEnv } from "./types";
+
+const app = new Hono<AppEnv>();
+
+app.onError((err, c) => {
+  if (err instanceof HttpError) return c.json({ error: err.message }, err.status);
+  if (err instanceof SyntaxError) return c.json({ error: "送信内容の形式が正しくありません" }, 400);
+  console.error(err);
+  return c.json({ error: "サーバーでエラーが発生しました" }, 500);
+});
+
+app.route("/auth", auth);
+
+// /api 以下はログイン必須
+app.use("/api/*", async (c, next) => {
+  const user = await readSession(c);
+  if (!user) return c.json({ error: "ログインしてください" }, 401);
+  c.set("user", user);
+  await next();
+});
+
+// ログイン中のアカウント・講師登録の有無・事務かどうか
+app.get("/api/me", async (c) => {
+  const user = c.get("user");
+  const [teacher, staff] = await Promise.all([findTeacherBySub(c.env.DB, user.sub), isStaff(c.env, user.email)]);
+  return c.json({ user, teacher, is_staff: staff });
+});
+
+app.get("/api/meta", (c) =>
+  c.json({
+    subjects: SUBJECTS,
+    periods: ALL_PERIODS,
+    period_labels: Object.fromEntries(ALL_PERIODS.map((p) => [p, periodLabel(p)])),
+  }),
+);
+
+app.route("/api/teacher", teacherApi);
+app.route("/api/admin", adminApi);
+
+app.all("/api/*", (c) => c.json({ error: "見つかりません" }, 404));
+app.all("/auth/*", (c) => c.notFound());
+
+export default app;

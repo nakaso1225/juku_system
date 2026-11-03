@@ -1,0 +1,20 @@
+name = "juku-scheduler"
+main = "src/index.ts"
+compatibility_date = "2026-05-01"
+
+# public/ の静的ファイル（HTML/JS/CSS）を配信。/api と /auth は先に Worker が処理する
+[assets]
+directory = "./public"
+binding = "ASSETS"
+run_worker_first = ["/api/*", "/auth/*"]
+
+[[d1_databases]]
+binding = "DB"
+database_name = "juku-scheduler"
+database_id = "00000000-0000-0000-0000-000000000000" # 本番作成時に `wrangler d1 create` の結果で置き換える
+migrations_dir = "migrations"
+
+# 秘密の値は wrangler.toml に書かない。
+#   ローカル: .dev.vars に書く（.dev.vars.example を参照）
+#   本番    : `npx wrangler secret put 名前` で登録する
+#     GOOGLE_CLIENT_ID / GOOGLE_CLIENT_SECRET / SESSION_SECRET / ADMIN_EMAILS
