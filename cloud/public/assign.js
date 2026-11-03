@@ -771,6 +771,56 @@ function toolbar(b, students) {
   );
 }
 
+// ------------------------------------------------------------ コピペ用（comiru 連携が止まったとき、元の GAS のシートに貼って登録する逃げ道）
+
+// 今のアプリ（app.py 版）の「コピペ用をコピー」と同じ形：生徒名・講師名・科目・日付・時限（タブ区切り）
+const SHEET_PERIOD_LABELS = { 2: "2限（10:45-12:15）", 3: "3限（13:15-14:45）", 4: "4限（15:00-16:30）", 5: "5限（16:45-18:15）", 6: "6限（18:30-20:00）", 7: "7限（例外）" };
+function sheetSubject(subject) {
+  const s = String(subject || "");
+  if (/算数/.test(s)) return "算数";
+  if (/中学数学|数学Ⅰ・A|数学Ⅱ・B|数学Ⅲ・C|情報/.test(s)) return "数学";
+  if (/中学受験国語|中学国語/.test(s)) return "国語";
+  if (/現代文/.test(s)) return "現代文";
+  if (/古文|漢文/.test(s)) return "古文・漢文";
+  if (/中学受験理科|中学理科|地学/.test(s)) return "理科";
+  if (/物理/.test(s)) return "物理";
+  if (/化学/.test(s)) return "化学";
+  if (/生物/.test(s)) return "生物";
+  if (/中学受験社会|中学社会|倫政|公共/.test(s)) return "社会";
+  if (/日本史/.test(s)) return "日本史";
+  if (/世界史/.test(s)) return "世界史";
+  if (/地理/.test(s)) return "地理";
+  if (/英語/.test(s)) return "英語";
+  return s;
+}
+
+/** studentId を指定すればその生徒だけ、null なら全員（生徒の並び順→日時順） */
+export function sheetRows(studentId) {
+  const v = view();
+  const ids = studentId == null ? studentList().map((s) => s.id) : [studentId];
+  const rows = [];
+  for (const id of ids) {
+    const list = [...(v.byStudent.get(id) ?? [])].sort((x, y) => (x.date === y.date ? x.period - y.period : x.date < y.date ? -1 : 1));
+    for (const a of list) {
+      rows.push([studentName(id), a.teacher_id == null ? "" : teacherName(a.teacher_id), sheetSubject(a.subject), a.date.replaceAll("-", "/"), SHEET_PERIOD_LABELS[a.period] ?? `${a.period}限`]);
+    }
+  }
+  return rows;
+}
+
+async function copySheetRows(studentId) {
+  await drained();
+  const rows = sheetRows(studentId);
+  if (!rows.length) return toast("コピーする授業がありません", true);
+  const text = rows.map((r) => r.join("\t")).join("\n");
+  try {
+    await navigator.clipboard.writeText(text);
+    toast(`コピペ用をコピーしました（${rows.length}行）。GAS のシートの「生徒名」の列に貼り付けてください`);
+  } catch {
+    window.prompt("自動でコピーできなかったので、下の内容を手でコピーしてください", text);
+  }
+}
+
 /** comiru への反映ボタン（未反映の件数つき） */
 function comiruActions() {
   const comiru = S.comiruStatus;
@@ -790,6 +840,13 @@ function comiruActions() {
       "button",
       { type: "button", class: `btn-small${comiru.pending_total ? " btn-primary" : ""}`, onclick: () => openComiruDialog(null) },
       `全体を comiru に反映${comiru.pending_total ? `（${comiru.pending_total}件）` : ""}`,
+    ),
+    el(
+      "details",
+      { class: "copy-menu" },
+      el("summary", { class: "btn-small", title: "comiru 連携が止まったときに、元の GAS のシートへ貼って登録する" }, "コピペ用"),
+      el("button", { type: "button", class: "btn-small", onclick: () => copySheetRows(S.studentId) }, "この生徒をコピー"),
+      el("button", { type: "button", class: "btn-small", onclick: () => copySheetRows(null) }, "全員分をコピー"),
     ),
   );
 }
