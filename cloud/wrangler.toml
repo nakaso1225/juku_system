@@ -11,7 +11,7 @@ run_worker_first = ["/api/*", "/auth/*"]
 [[d1_databases]]
 binding = "DB"
 database_name = "juku-scheduler"
-database_id = "00000000-0000-0000-0000-000000000000" # 本番作成時に `wrangler d1 create` の結果で置き換える
+database_id = "7c7393ed-9fdc-4835-88ab-7aae3219b4cd"
 migrations_dir = "migrations"
 
 # 秘密の値は wrangler.toml に書かない。
