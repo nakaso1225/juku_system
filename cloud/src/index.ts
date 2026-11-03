@@ -2,8 +2,10 @@ import { Hono } from "hono";
 import { adminApi, isStaff } from "./admin";
 import { auth } from "./auth";
 import { ALL_PERIODS, periodLabel, SUBJECTS } from "./constants";
+import { getTableIds } from "./settings";
+import { GRADES } from "./roster";
 import { readSession } from "./session";
-import { findTeacherBySub, teacherApi } from "./teacher";
+import { findLinkRequest, isInactiveTeacher, resolveTeacher, teacherApi } from "./teacher";
 import { HttpError } from "./terms";
 import type { AppEnv } from "./types";
 
@@ -26,18 +28,22 @@ app.use("/api/*", async (c, next) => {
   await next();
 });
 
-// ログイン中のアカウント・講師登録の有無・事務かどうか
+// ログイン中のアカウント・紐付いた講師（または申請中か）・事務かどうか
 app.get("/api/me", async (c) => {
   const user = c.get("user");
-  const [teacher, staff] = await Promise.all([findTeacherBySub(c.env.DB, user.sub), isStaff(c.env, user.email)]);
-  return c.json({ user, teacher, is_staff: staff });
+  const [teacher, staff] = await Promise.all([resolveTeacher(c.env, user), isStaff(c.env, user.email)]);
+  const inactive = teacher ? false : await isInactiveTeacher(c.env.DB, user.sub);
+  const linkRequest = teacher || inactive ? null : await findLinkRequest(c.env.DB, user.sub);
+  return c.json({ user, teacher, teacher_inactive: inactive, link_request: linkRequest, is_staff: staff });
 });
 
-app.get("/api/meta", (c) =>
+app.get("/api/meta", async (c) =>
   c.json({
     subjects: SUBJECTS,
     periods: ALL_PERIODS,
     period_labels: Object.fromEntries(ALL_PERIODS.map((p) => [p, periodLabel(p)])),
+    table_ids: await getTableIds(c.env.DB),
+    grades: GRADES,
   }),
 );
 

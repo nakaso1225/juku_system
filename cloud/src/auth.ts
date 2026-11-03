@@ -15,6 +15,14 @@ function safeNext(next: string | undefined): string {
   return "/";
 }
 
+/** 貼り付け時に混ざった前後の空白・改行を除いた Google の設定値 */
+function googleConfig(env: AppEnv["Bindings"]) {
+  return {
+    clientId: (env.GOOGLE_CLIENT_ID || "").trim(),
+    clientSecret: (env.GOOGLE_CLIENT_SECRET || "").trim(),
+  };
+}
+
 function callbackUrl(requestUrl: string): string {
   return new URL("/auth/callback", requestUrl).toString();
 }
@@ -22,7 +30,8 @@ function callbackUrl(requestUrl: string): string {
 export const auth = new Hono<AppEnv>();
 
 auth.get("/login", async (c) => {
-  if (!c.env.GOOGLE_CLIENT_ID) {
+  const { clientId } = googleConfig(c.env);
+  if (!clientId) {
     return c.text("GOOGLE_CLIENT_ID が設定されていません", 500);
   }
   const state = randomToken();
@@ -30,7 +39,7 @@ auth.get("/login", async (c) => {
   setShortCookie(c, STATE_COOKIE, await signValue(c.env.SESSION_SECRET, { state, next }));
 
   const url = new URL(GOOGLE_AUTH_URL);
-  url.searchParams.set("client_id", c.env.GOOGLE_CLIENT_ID);
+  url.searchParams.set("client_id", clientId);
   url.searchParams.set("redirect_uri", callbackUrl(c.req.url));
   url.searchParams.set("response_type", "code");
   url.searchParams.set("scope", "openid email profile");
@@ -44,9 +53,17 @@ auth.get("/callback", async (c) => {
   deleteCookie(c, STATE_COOKIE, { path: "/auth" });
 
   const code = c.req.query("code");
-  if (!saved || !code || c.req.query("state") !== saved.state) {
-    return c.text("ログインに失敗しました。もう一度お試しください。", 400);
+  if (c.req.query("error")) {
+    return c.text(`Google でのログインが中断されました（${c.req.query("error")}）。もう一度お試しください。`, 400);
   }
+  if (!saved || !code || c.req.query("state") !== saved.state) {
+    // 戻るボタンや再読み込みで同じ画面を開き直したときもここに来る
+    return c.html(
+      '<p>ログインの有効期限が切れました。<a href="/">最初の画面</a>からもう一度ログインしてください。</p>',
+      400,
+    );
+  }
+  const { clientId, clientSecret } = googleConfig(c.env);
 
   // 認可コードを Google のトークン窓口で直接交換する。
   // サーバー間の TLS 通信で受け取った id_token なので、署名検証の代わりに TLS で発行元を確認できる（OIDC Core 3.1.3.7）
@@ -55,14 +72,23 @@ auth.get("/callback", async (c) => {
     headers: { "Content-Type": "application/x-www-form-urlencoded" },
     body: new URLSearchParams({
       code,
-      client_id: c.env.GOOGLE_CLIENT_ID,
-      client_secret: c.env.GOOGLE_CLIENT_SECRET,
+      client_id: clientId,
+      client_secret: clientSecret,
       redirect_uri: callbackUrl(c.req.url),
       grant_type: "authorization_code",
     }),
   });
   if (!tokenRes.ok) {
-    return c.text("Google での確認に失敗しました。もう一度お試しください。", 400);
+    // Google の応答は error と error_description だけで、秘密の値は含まれない
+    const detail = (await tokenRes.json().catch(() => ({}))) as { error?: string; error_description?: string };
+    console.error("google token exchange failed", tokenRes.status, detail.error, detail.error_description, {
+      // 値そのものは出さず、設定ミスの見当をつけるための形だけを記録する
+      secret_length: clientSecret.length,
+      secret_has_google_prefix: clientSecret.startsWith("GOCSPX-"),
+      secret_equals_client_id: clientSecret === clientId,
+      client_id_suffix_ok: clientId.endsWith(".apps.googleusercontent.com"),
+    });
+    return c.text(`Google での確認に失敗しました（${detail.error ?? tokenRes.status}）。もう一度お試しください。`, 400);
   }
   const { id_token } = (await tokenRes.json()) as { id_token?: string };
   if (!id_token) return c.text("Google から本人情報を受け取れませんでした。", 400);
@@ -70,12 +96,15 @@ auth.get("/callback", async (c) => {
   const claims = decodeJwtPayload(id_token);
   const valid =
     GOOGLE_ISSUERS.has(String(claims.iss)) &&
-    claims.aud === c.env.GOOGLE_CLIENT_ID &&
+    claims.aud === clientId &&
     Number(claims.exp) > Date.now() / 1000 &&
     claims.email_verified === true &&
     typeof claims.sub === "string" &&
     typeof claims.email === "string";
-  if (!valid) return c.text("Google アカウントを確認できませんでした。", 400);
+  if (!valid) {
+    console.error("id_token rejected", { iss: claims.iss, aud_ok: claims.aud === clientId, email_verified: claims.email_verified });
+    return c.text("Google アカウントを確認できませんでした。", 400);
+  }
 
   await startSession(c, {
     sub: claims.sub as string,

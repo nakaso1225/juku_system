@@ -1,18 +1,59 @@
 // 講師ページ用 API（ログインした本人の情報だけを扱う）
+//
+// 講師は comiru の名簿（teachers）に最初から全員いる。Google でログインすると
+//   1. その Google アカウントがすでに紐付いていれば、その講師
+//   2. comiru に登録されたメールアドレスと一致すれば、その場で自動的に紐付ける
+//   3. 一致しなければ、本人が名前を入れて「本人です」と申請し、事務が承認すると紐付く（初回だけ）
 import { Hono } from "hono";
+import { bumpVersion, resetCompletedWithErrors } from "./assignments";
+import { replaceSlotsStatements, TEACHER_SLOTS } from "./availability";
+import { ensureFreshRoster, normalizeName } from "./comiru";
 import { SUBJECTS } from "./constants";
 import { getTerm, HttpError, nowIso, parseSlots, rowToTerm, termForClient, type Slot } from "./terms";
-import type { AppEnv } from "./types";
+import type { AppEnv, Env, SessionUser } from "./types";
 
-interface TeacherRow {
+export interface TeacherRow {
   id: number;
-  email: string;
   name: string;
-  status: "pending" | "approved" | "rejected";
+  google_email: string | null;
 }
 
-export async function findTeacherBySub(db: D1Database, sub: string): Promise<TeacherRow | null> {
-  return db.prepare("SELECT id, email, name, status FROM teachers WHERE google_sub = ?").bind(sub).first<TeacherRow>();
+export interface LinkRequestRow {
+  requested_name: string;
+  created_at: string;
+}
+
+/** ログイン中の Google アカウントに紐付いた講師。未紐付けなら comiru のアドレスとの照合を試す */
+export async function resolveTeacher(env: Env, user: SessionUser): Promise<TeacherRow | null> {
+  const db = env.DB;
+  const linked = await db
+    .prepare("SELECT id, name, google_email, active FROM teachers WHERE google_sub = ?")
+    .bind(user.sub)
+    .first<TeacherRow & { active: number }>();
+  // 紐付け済みでも、comiru の講師名簿から外れた講師（active = 0）は使えない（一覧から「隠す」とは別）
+  if (linked) return linked.active ? { id: linked.id, name: linked.name, google_email: linked.google_email } : null;
+
+  await ensureFreshRoster(env, "comiru_teachers");
+  const { results } = await db
+    .prepare("SELECT id FROM teachers WHERE google_sub IS NULL AND active = 1 AND email != '' AND lower(email) = ?")
+    .bind(user.email.toLowerCase())
+    .all<{ id: number }>();
+  if (results.length !== 1) return null;
+
+  await db.batch([
+    db
+      .prepare("UPDATE teachers SET google_sub = ?, google_email = ?, updated_at = ? WHERE id = ? AND google_sub IS NULL")
+      .bind(user.sub, user.email, nowIso(), results[0].id),
+    db.prepare("DELETE FROM teacher_link_requests WHERE google_sub = ?").bind(user.sub),
+  ]);
+  return db.prepare("SELECT id, name, google_email FROM teachers WHERE google_sub = ?").bind(user.sub).first<TeacherRow>();
+}
+
+export async function findLinkRequest(db: D1Database, sub: string): Promise<LinkRequestRow | null> {
+  return db
+    .prepare("SELECT requested_name, created_at FROM teacher_link_requests WHERE google_sub = ?")
+    .bind(sub)
+    .first<LinkRequestRow>();
 }
 
 async function teacherSubjects(db: D1Database, teacherId: number): Promise<string[]> {
@@ -24,67 +65,85 @@ async function teacherSubjects(db: D1Database, teacherId: number): Promise<strin
   return results.map((r) => r.subject).sort((a, b) => (order.get(a) ?? 99) - (order.get(b) ?? 99));
 }
 
-function parseProfile(body: Record<string, unknown>): { name: string; subjects: string[] } {
-  const name = String(body.name ?? "").replace(/\s+/g, "");
-  if (!name) throw new HttpError(400, "氏名を入力してください");
-  if (name.length > 40) throw new HttpError(400, "氏名は40文字以内にしてください");
-  const subjects = Array.isArray(body.subjects) ? [...new Set(body.subjects.map(String))] : [];
+function parseSubjects(raw: unknown): string[] {
+  const subjects = Array.isArray(raw) ? [...new Set(raw.map(String))] : [];
   if (!subjects.length) throw new HttpError(400, "指導できる科目を1つ以上選んでください");
   const unknown = subjects.filter((s) => !(SUBJECTS as readonly string[]).includes(s));
   if (unknown.length) throw new HttpError(400, `不明な科目です: ${unknown.join(", ")}`);
-  return { name, subjects };
+  return subjects;
 }
 
-function replaceSubjectsStatements(db: D1Database, teacherId: number, subjects: string[]): D1PreparedStatement[] {
-  return [
-    db.prepare("DELETE FROM teacher_subjects WHERE teacher_id = ?").bind(teacherId),
-    db
-      .prepare("INSERT INTO teacher_subjects (teacher_id, subject) SELECT ?, value FROM json_each(?)")
-      .bind(teacherId, JSON.stringify(subjects)),
-  ];
+/** ログイン中のアカウントが、名簿から外れた講師に紐付いているか */
+export async function isInactiveTeacher(db: D1Database, sub: string): Promise<boolean> {
+  return Boolean(await db.prepare("SELECT 1 FROM teachers WHERE google_sub = ? AND active = 0").bind(sub).first());
 }
 
-/** 登録済みで、却下されていない講師本人を取り出す */
-async function requireTeacher(db: D1Database, sub: string): Promise<TeacherRow> {
-  const teacher = await findTeacherBySub(db, sub);
-  if (!teacher) throw new HttpError(404, "講師登録がまだです");
-  if (teacher.status === "rejected") throw new HttpError(403, "この講師登録は承認されませんでした。事務にお問い合わせください");
+export const INACTIVE_TEACHER_MESSAGE = "comiru の講師名簿にいないため、使えません。心当たりがない場合は事務にお問い合わせください";
+
+async function requireTeacher(env: Env, user: SessionUser): Promise<TeacherRow> {
+  const teacher = await resolveTeacher(env, user);
+  if (!teacher) {
+    throw new HttpError(403, (await isInactiveTeacher(env.DB, user.sub)) ? INACTIVE_TEACHER_MESSAGE : "このアカウントはまだ講師と紐付いていません");
+  }
   return teacher;
 }
 
 export const teacherApi = new Hono<AppEnv>();
 
 teacherApi.get("/profile", async (c) => {
-  const teacher = await findTeacherBySub(c.env.DB, c.get("user").sub);
-  if (!teacher) return c.json({ teacher: null });
-  return c.json({ teacher: { ...teacher, subjects: await teacherSubjects(c.env.DB, teacher.id) } });
+  const user = c.get("user");
+  const teacher = await resolveTeacher(c.env, user);
+  if (!teacher) return c.json({ teacher: null, link_request: await findLinkRequest(c.env.DB, user.sub) });
+  return c.json({ teacher: { ...teacher, subjects: await teacherSubjects(c.env.DB, teacher.id) }, link_request: null });
 });
 
-// 新規登録（事務の承認待ちになる）
-teacherApi.post("/register", async (c) => {
+// comiru のアドレスと一致しなかった人の「本人です」申請。名前が comiru の講師と一致するときだけ受け付ける
+teacherApi.post("/link-request", async (c) => {
   const user = c.get("user");
   const db = c.env.DB;
-  if (await findTeacherBySub(db, user.sub)) throw new HttpError(409, "すでに登録されています");
-  const { name, subjects } = parseProfile(await c.req.json());
+  if (await resolveTeacher(c.env, user)) throw new HttpError(409, "すでに講師と紐付いています");
+  if (await isInactiveTeacher(db, user.sub)) throw new HttpError(403, INACTIVE_TEACHER_MESSAGE);
 
-  const inserted = await db
-    .prepare("INSERT INTO teachers (google_sub, email, name) VALUES (?, ?, ?) RETURNING id")
-    .bind(user.sub, user.email, name)
-    .first<{ id: number }>();
-  await db.batch(replaceSubjectsStatements(db, inserted!.id, subjects));
+  const name = String((await c.req.json<{ name?: string }>()).name ?? "").trim();
+  if (!name) throw new HttpError(400, "名前を入力してください");
+  const { results } = await db
+    .prepare("SELECT id, name FROM teachers WHERE active = 1")
+    .all<{ id: number; name: string }>();
+  const match = results.find((t) => normalizeName(t.name) === normalizeName(name));
+  if (!match) {
+    throw new HttpError(400, "comiru に登録されている講師の名前と一致しません。comiru と同じ漢字で入力してください");
+  }
+  await db
+    .prepare(
+      `INSERT INTO teacher_link_requests (google_sub, google_email, google_name, requested_name, created_at)
+       VALUES (?, ?, ?, ?, ?)
+       ON CONFLICT (google_sub) DO UPDATE SET requested_name = excluded.requested_name, created_at = excluded.created_at`,
+    )
+    .bind(user.sub, user.email, user.name, match.name, nowIso())
+    .run();
   return c.json({ ok: true }, 201);
 });
 
-// 氏名・科目の変更（メールアドレスは Google アカウントのものを使う）
+teacherApi.delete("/link-request", async (c) => {
+  await c.env.DB.prepare("DELETE FROM teacher_link_requests WHERE google_sub = ?").bind(c.get("user").sub).run();
+  return c.json({ ok: true });
+});
+
+// 指導できる科目の変更（名前・メールアドレスは comiru のものを使うので変更しない）
 teacherApi.patch("/profile", async (c) => {
   const db = c.env.DB;
-  const teacher = await requireTeacher(db, c.get("user").sub);
-  const { name, subjects } = parseProfile(await c.req.json());
+  const teacher = await requireTeacher(c.env, c.get("user"));
+  const subjects = parseSubjects((await c.req.json<{ subjects?: unknown }>()).subjects);
+  // 科目が変わると、授業の入っている講習で「講師予定不一致」が出ることがある
+  const { results: termRows } = await db.prepare("SELECT DISTINCT term_id FROM assignments WHERE teacher_id = ?").bind(teacher.id).all<{ term_id: number }>();
   await db.batch([
+    db.prepare("DELETE FROM teacher_subjects WHERE teacher_id = ?").bind(teacher.id),
     db
-      .prepare("UPDATE teachers SET name = ?, email = ?, updated_at = ? WHERE id = ?")
-      .bind(name, c.get("user").email, nowIso(), teacher.id),
-    ...replaceSubjectsStatements(db, teacher.id, subjects),
+      .prepare("INSERT INTO teacher_subjects (teacher_id, subject) SELECT ?, value FROM json_each(?)")
+      .bind(teacher.id, JSON.stringify(subjects)),
+    db.prepare("UPDATE teachers SET updated_at = ? WHERE id = ?").bind(nowIso(), teacher.id),
+    db.prepare("UPDATE terms SET version = version + 1 WHERE id IN (SELECT term_id FROM assignments WHERE teacher_id = ?)").bind(teacher.id),
+    ...termRows.map((r) => resetCompletedWithErrors(db, r.term_id)),
   ]);
   return c.json({ ok: true });
 });
@@ -92,7 +151,7 @@ teacherApi.patch("/profile", async (c) => {
 // 入力を受け付けている講習の一覧と、それぞれの提出状況
 teacherApi.get("/terms", async (c) => {
   const db = c.env.DB;
-  const teacher = await requireTeacher(db, c.get("user").sub);
+  const teacher = await requireTeacher(c.env, c.get("user"));
   const { results } = await db
     .prepare(
       `SELECT t.*, e.submitted_at, e.updated_at
@@ -114,7 +173,7 @@ teacherApi.get("/terms", async (c) => {
 
 teacherApi.get("/terms/:termId", async (c) => {
   const db = c.env.DB;
-  const teacher = await requireTeacher(db, c.get("user").sub);
+  const teacher = await requireTeacher(c.env, c.get("user"));
   const term = await getTerm(db, Number(c.req.param("termId")));
   const [slots, entry] = await Promise.all([
     db
@@ -135,45 +194,25 @@ teacherApi.get("/terms/:termId", async (c) => {
   });
 });
 
-// 予定の保存。2回目以降の保存では、変わったコマを事務への通知用に記録する
+// 予定の保存
 teacherApi.put("/terms/:termId", async (c) => {
   const db = c.env.DB;
-  const teacher = await requireTeacher(db, c.get("user").sub);
+  const teacher = await requireTeacher(c.env, c.get("user"));
   const term = await getTerm(db, Number(c.req.param("termId")));
   if (!term.accepting) throw new HttpError(403, "この講習の入力受付は終了しています");
 
   const body = await c.req.json<Record<string, unknown>>();
-  const slots = parseSlots(term, body.slots);
+  const slots = parseSlots(term, body.slots, { dropOutside: true });
   const note = String(body.note ?? "").slice(0, 500);
 
-  const [existingRes, entry] = await Promise.all([
-    db
-      .prepare("SELECT date, period FROM teacher_availability WHERE term_id = ? AND teacher_id = ?")
-      .bind(term.id, teacher.id)
-      .all<Slot>(),
-    db
-      .prepare("SELECT submitted_at FROM teacher_term_entries WHERE term_id = ? AND teacher_id = ?")
-      .bind(term.id, teacher.id)
-      .first<{ submitted_at: string }>(),
-  ]);
-
-  const key = (s: Slot) => `${s.date}#${s.period}`;
-  const before = new Set(existingRes.results.map(key));
-  const after = new Set(slots.map(key));
-  const changes = [
-    ...slots.filter((s) => !before.has(key(s))).map((s) => ({ ...s, action: "add" })),
-    ...existingRes.results.filter((s) => !after.has(key(s))).map((s) => ({ ...s, action: "remove" })),
-  ];
+  const entry = await db
+    .prepare("SELECT submitted_at FROM teacher_term_entries WHERE term_id = ? AND teacher_id = ?")
+    .bind(term.id, teacher.id)
+    .first<{ submitted_at: string }>();
 
   const now = nowIso();
-  const statements = [
-    db.prepare("DELETE FROM teacher_availability WHERE term_id = ? AND teacher_id = ?").bind(term.id, teacher.id),
-    db
-      .prepare(
-        `INSERT INTO teacher_availability (term_id, teacher_id, date, period)
-         SELECT ?, ?, json_extract(value, '$.date'), json_extract(value, '$.period') FROM json_each(?)`,
-      )
-      .bind(term.id, teacher.id, JSON.stringify(slots)),
+  const statements = await replaceSlotsStatements(db, TEACHER_SLOTS, term.id, teacher.id, slots);
+  statements.push(
     db
       .prepare(
         `INSERT INTO teacher_term_entries (term_id, teacher_id, note, submitted_at, updated_at)
@@ -181,19 +220,23 @@ teacherApi.put("/terms/:termId", async (c) => {
          ON CONFLICT (term_id, teacher_id) DO UPDATE SET note = excluded.note, updated_at = excluded.updated_at`,
       )
       .bind(term.id, teacher.id, note, now, now),
-  ];
-  if (entry && changes.length) {
+  );
+  // 初回提出の内容を「事務が把握している予定」の基準にする（コマ割り当て時の変更検知に使う）
+  if (!entry) {
     statements.push(
+      db.prepare("DELETE FROM availability_baseline WHERE term_id = ? AND teacher_id = ?").bind(term.id, teacher.id),
       db
         .prepare(
-          `INSERT INTO availability_changes (term_id, teacher_id, date, period, action, changed_at)
-           SELECT ?, ?, json_extract(value, '$.date'), json_extract(value, '$.period'), json_extract(value, '$.action'), ?
-             FROM json_each(?)`,
+          `INSERT INTO availability_baseline (term_id, teacher_id, date, period)
+           SELECT ?, ?, json_extract(value, '$.date'), json_extract(value, '$.period') FROM json_each(?)`,
         )
-        .bind(term.id, teacher.id, now, JSON.stringify(changes)),
+        .bind(term.id, teacher.id, JSON.stringify(slots)),
     );
   }
+  // 隠していた講師が予定を入力したら、一覧に戻す（復帰した講師を見落とさないため）
+  statements.push(db.prepare("UPDATE teachers SET hidden = 0 WHERE id = ? AND hidden = 1").bind(teacher.id));
+  statements.push(bumpVersion(db, term.id), resetCompletedWithErrors(db, term.id));
   await db.batch(statements);
 
-  return c.json({ ok: true, slot_count: slots.length, changed: entry ? changes.length : null, updated_at: now });
+  return c.json({ ok: true, slot_count: slots.length, first_submission: !entry, updated_at: now });
 });

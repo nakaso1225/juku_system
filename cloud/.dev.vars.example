@@ -6,3 +6,7 @@ SESSION_SECRET=ローカル用の長いランダム文字列
 ADMIN_EMAILS=admin@example.com
 # 1 にすると Google を使わずにログインできる（ローカル専用。本番では絶対に設定しない）
 DEV_LOGIN=1
+# comiru 連携（本番は wrangler secret で登録）。ローカルでは偽の comiru に向けてテストできる
+COMIRU_TOKEN=
+COMIRU_SCHOOL_ID=
+# COMIRU_API_BASE_URL=http://127.0.0.1:9999

@@ -6,6 +6,10 @@ export interface Env {
   SESSION_SECRET: string;
   ADMIN_EMAILS?: string;
   DEV_LOGIN?: string;
+  COMIRU_TOKEN?: string;
+  COMIRU_SCHOOL_ID?: string;
+  /** テスト用。省略時は https://api.comiru.com */
+  COMIRU_API_BASE_URL?: string;
 }
 
 /** ログイン中の Google アカウント */

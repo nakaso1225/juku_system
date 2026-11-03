@@ -45,3 +45,7 @@ export function periodLabel(period: number): string {
   const def = PERIOD_DEFS[period];
   return def ? `${period}限（${def.start}-${def.end}）` : `${period}限`;
 }
+
+// 生徒の調整ステータス（今のアプリと同じ。「要調整」はエラーがあるときにシステムが表示する）
+export const STUDENT_STATUSES = ["調整中", "完了"] as const;
+export const STATUS_NEEDS_ADJUSTMENT = "要調整";

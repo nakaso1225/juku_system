@@ -78,7 +78,7 @@ export function isSlotInTerm(term: Term, slot: Slot): boolean {
 }
 
 /** クライアントから来たコマ一覧を検証し、重複を除いて返す */
-export function parseSlots(term: Term, raw: unknown): Slot[] {
+export function parseSlots(term: Term, raw: unknown, { dropOutside = false } = {}): Slot[] {
   if (!Array.isArray(raw)) throw new HttpError(400, "slots は配列で指定してください");
   const seen = new Set<string>();
   const slots: Slot[] = [];
@@ -90,6 +90,8 @@ export function parseSlots(term: Term, raw: unknown): Slot[] {
     }
     const slot = { date, period };
     if (!isSlotInTerm(term, slot)) {
+      // あとから休校日にした日などを含む予定は、その分だけ外して保存する（そのまま保存し直せるように）
+      if (dropOutside) continue;
       throw new HttpError(400, `${date} ${period}限 は講習の対象外です`);
     }
     const key = `${date}#${period}`;

@@ -117,48 +117,71 @@ label.field > span { display: block; font-weight: 600; margin-bottom: 4px; font-
   z-index: 20;
 }
 .savebar-inner { max-width: 760px; margin: 0 auto; display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+.savebar { transition: background-color 0.2s; }
 .savebar .status { font-size: 0.9rem; color: var(--muted); }
+.savebar.dirty { background: var(--warn-weak); }
+.savebar.dirty .status { color: var(--warn); font-weight: 600; }
+.savebar.saved { background: var(--on-weak); }
+.savebar.saved .status { color: var(--on); font-weight: 600; }
 .savebar .btn-primary { white-space: nowrap; flex-shrink: 0; }
-.savebar .status.dirty { color: var(--warn); font-weight: 600; }
 
 .toast {
-  position: fixed; left: 50%; top: 16px; transform: translateX(-50%);
+  position: fixed; left: 50%; bottom: calc(84px + env(safe-area-inset-bottom)); transform: translateX(-50%);
   background: #111827; color: #fff; padding: 10px 16px; border-radius: 8px;
   font-size: 0.9rem; z-index: 50; max-width: calc(100% - 32px);
 }
 .toast.error { background: var(--danger); }
 
 /* ------------------------------------------------ カレンダー */
-.cal-week { margin-bottom: 18px; }
+.cal-week { margin-bottom: 20px; }
 .cal-week-head {
   display: flex; align-items: center; justify-content: space-between; gap: 8px;
-  font-weight: 600; margin-bottom: 6px; font-size: 0.95rem;
+  font-weight: 600; margin-bottom: 4px; font-size: 0.95rem;
 }
-.cal-table { width: 100%; border-collapse: separate; border-spacing: 4px; table-layout: fixed; }
-.cal-table th { font-size: 0.75rem; color: var(--muted); font-weight: 600; line-height: 1.2; padding: 2px 0; }
-.cal-table th small { display: block; font-weight: 400; font-size: 0.65rem; }
-.cal-table th.cal-daycol { width: 74px; }
-.cal-day {
-  font-size: 0.85rem; text-align: left; white-space: nowrap; padding: 0 4px;
-  border: none; background: none; min-height: 44px; width: 100%; justify-content: flex-start;
+.cal-table { width: 100%; border-collapse: separate; border-spacing: 3px; table-layout: fixed; }
+.cal-table th { font-weight: 600; line-height: 1.15; padding: 0; vertical-align: middle; }
+.cal-table th.cal-periodcol { width: 46px; }
+.cal-date, .cal-date-btn { text-align: center; font-size: 0.8rem; }
+.cal-date .dow, .cal-date-btn .dow { display: block; font-size: 0.7rem; color: var(--muted); font-weight: 600; }
+.cal-date .day, .cal-date-btn .day { display: block; font-size: 1rem; }
+.cal-date.out { opacity: 0.35; }
+.cal-date.closed .day { color: var(--muted); }
+.cal-table .dow-0 { color: var(--danger); }
+.cal-table .dow-6 { color: var(--primary); }
+.cal-date-btn, .cal-period-btn {
+  width: 100%; min-height: 40px; padding: 2px 0; border: none; background: none; border-radius: 6px;
+  flex-direction: column; gap: 0; -webkit-tap-highlight-color: transparent;
 }
-.cal-day .dow-0 { color: var(--danger); }
-.cal-day .dow-6 { color: var(--primary); }
+.cal-date-btn:active, .cal-period-btn:active { background: var(--primary-weak); }
+.cal-period, .cal-period-btn { font-size: 0.8rem; text-align: center; }
+.cal-period small, .cal-period-btn small { display: block; font-size: 0.65rem; color: var(--muted); font-weight: 400; }
 .cal-cell {
-  height: 44px; border-radius: 8px; border: 1px solid var(--border); background: var(--surface);
-  text-align: center; font-size: 1.1rem; user-select: none; -webkit-user-select: none;
-  touch-action: manipulation;
-  -webkit-tap-highlight-color: transparent;
+  height: 44px; border-radius: 7px; border: 1px solid var(--border); background: var(--surface);
+  text-align: center; font-size: 1.05rem; user-select: none; -webkit-user-select: none;
+  touch-action: manipulation; -webkit-tap-highlight-color: transparent; padding: 0;
 }
 .cal-cell.editable { cursor: pointer; }
 .cal-cell.on { background: var(--on-weak); border-color: var(--on); color: var(--on); font-weight: 700; }
 .cal-cell.added { box-shadow: inset 0 0 0 2px var(--warn); }
+.cal-cell.removed { background: var(--danger-weak); border: 2px solid var(--danger); color: var(--danger); font-weight: 700; }
 .cal-cell.closed { background: var(--closed); border-color: var(--closed); color: var(--muted); font-size: 0.75rem; }
+.cal-cell.out { background: transparent; border: 1px dashed var(--closed); }
 .cal-legend em { font-style: normal; }
 .cal-legend { display: flex; gap: 14px; flex-wrap: wrap; font-size: 0.8rem; color: var(--muted); margin-bottom: 10px; }
 .cal-legend span::before { content: ""; display: inline-block; width: 12px; height: 12px; border-radius: 3px; margin-right: 4px; vertical-align: -1px; border: 1px solid var(--border); }
 .cal-legend .lg-on::before { background: var(--on-weak); border-color: var(--on); }
 .cal-legend .lg-closed::before { background: var(--closed); }
+.cal-legend .lg-removed::before { background: var(--danger-weak); border: 2px solid var(--danger); }
+.cal-legend .lg-added::before { box-shadow: inset 0 0 0 2px var(--warn); }
+
+/* スマホでは表の横幅を確保するため、カードの内側の余白を詰める */
+@media (max-width: 480px) {
+  .page { padding-left: 10px; padding-right: 10px; }
+  .card { padding: 12px 8px; }
+  .cal-table { border-spacing: 2px; }
+  .cal-table th.cal-periodcol { width: 38px; }
+  .cal-cell { height: 42px; border-radius: 6px; }
+}
 
 /* ------------------------------------------------ 管理画面 */
 .tabs { display: flex; gap: 4px; border-bottom: 1px solid var(--border); margin-bottom: 16px; overflow-x: auto; }
@@ -192,3 +215,185 @@ table.list input { padding: 6px 8px; min-width: 90px; }
 .login-box { text-align: center; padding: 32px 16px; }
 .login-box .btn-primary { font-size: 1.05rem; padding: 12px 22px; }
 .dev-login { margin-top: 24px; font-size: 0.85rem; }
+
+/* 生徒の追加（検索候補） */
+.student-adder { position: relative; }
+.suggest {
+  position: absolute; left: 0; right: 0; top: calc(100% + 4px); z-index: 10;
+  background: var(--surface); border: 1px solid var(--border); border-radius: 8px; box-shadow: var(--shadow);
+  max-height: 320px; overflow-y: auto;
+}
+.suggest-item {
+  display: flex; justify-content: space-between; width: 100%; border: none; border-radius: 0;
+  border-bottom: 1px solid var(--border); background: none; padding: 10px 12px; min-height: 40px; text-align: left;
+}
+.suggest-item:hover:not(.disabled) { background: var(--primary-weak); }
+.suggest-item.disabled { color: var(--muted); }
+.suggest-item.other { color: var(--primary); }
+
+/* 入力画面（モーダル）の下に固定する保存欄 */
+.modal-footer {
+  position: sticky; bottom: 0; margin: 16px -16px -16px; padding: 12px 16px;
+  background: var(--surface); border-top: 1px solid var(--border); border-radius: 0 0 var(--radius) var(--radius);
+  display: flex; align-items: center; justify-content: space-between; gap: 12px;
+}
+.modal-footer .status { font-size: 0.9rem; color: var(--muted); }
+.modal-footer.dirty { background: var(--warn-weak); }
+.modal-footer.dirty .status { color: var(--warn); font-weight: 600; }
+.modal-footer.saved { background: var(--on-weak); }
+.modal-footer.saved .status { color: var(--on); font-weight: 600; }
+.modal-footer .btn-primary { white-space: nowrap; }
+
+/* ------------------------------------------------ 割り当て画面 */
+.tone-math { --tone: #2563eb; --tone-weak: #dbeafe; }
+.tone-jp { --tone: #be185d; --tone-weak: #fce7f3; }
+.tone-en { --tone: #7c3aed; --tone-weak: #ede9fe; }
+.tone-sci { --tone: #059669; --tone-weak: #d1fae5; }
+.tone-soc { --tone: #b45309; --tone-weak: #fef3c7; }
+.tone-other { --tone: #475569; --tone-weak: #e2e8f0; }
+
+.assign-toolbar { padding: 12px 16px; }
+.count-chip { font-size: 0.8rem; padding: 2px 8px; border-radius: 999px; background: var(--tone-weak); color: var(--tone); font-weight: 600; }
+.suggest-item.current { background: var(--primary-weak); }
+
+.conflict-bar { background: var(--danger-weak); color: var(--danger); border-radius: var(--radius); padding: 8px 12px; margin-bottom: 12px; font-size: 0.9rem; }
+.conflict-bar .btn-link { color: var(--danger); font-weight: 700; text-decoration: underline; padding: 0 2px; }
+
+.palette { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; margin-bottom: 12px; font-size: 0.9rem; }
+.teacher-chip {
+  display: inline-flex; flex-direction: column; align-items: flex-start; gap: 0; min-height: 36px; padding: 4px 10px;
+  border: 1px solid var(--tone); background: var(--tone-weak); color: var(--tone); font-weight: 600; cursor: grab; touch-action: none;
+}
+.teacher-chip small { font-weight: 400; font-size: 0.7rem; }
+
+.assign-table { width: 100%; border-collapse: separate; border-spacing: 3px; table-layout: fixed; }
+.assign-table th { font-weight: 600; padding: 0; }
+.assign-table th.cal-periodcol { width: 48px; }
+.assign-table .cal-date { text-align: center; font-size: 0.8rem; }
+.assign-table .cal-date .dow { display: block; font-size: 0.7rem; color: var(--muted); }
+.assign-table .cal-date .day { display: block; font-size: 0.95rem; }
+.assign-table .cal-date.out { opacity: 0.35; }
+.assign-table .dow-0 { color: var(--danger) !important; }
+.assign-table .dow-6 { color: var(--primary) !important; }
+.assign-table .cal-period { font-size: 0.8rem; text-align: center; }
+.assign-table .cal-period small { display: block; font-size: 0.65rem; color: var(--muted); font-weight: 400; }
+
+.acell {
+  position: relative; height: 56px; border-radius: 7px; border: 1px solid var(--border); background: var(--surface);
+  text-align: center; vertical-align: middle; font-size: 0.8rem; padding: 2px;
+}
+.acell.out { background: transparent; border: 1px dashed var(--closed); }
+.acell.closed { background: var(--closed); border-color: var(--closed); color: var(--muted); }
+.acell.unavailable { background: repeating-linear-gradient(45deg, #f3f4f6, #f3f4f6 6px, #e9ebee 6px, #e9ebee 12px); border-color: #e5e7eb; }
+.acell.open { cursor: pointer; }
+.acell.open:hover { outline: 2px solid var(--primary); }
+.acell.has-teacher { background: var(--on-weak); border-color: #86efac; }
+.acell.has-teacher .hint { color: var(--on); font-weight: 600; }
+.acell.full .hint, .acell.none .hint { color: var(--muted); }
+.acell.assigned { cursor: pointer; background: var(--surface); }
+.acell.conflict { border: 2px solid var(--danger); background: var(--danger-weak); }
+.pill {
+  display: flex; justify-content: space-between; align-items: center; gap: 4px; padding: 3px 6px; border-radius: 6px;
+  background: var(--tone-weak); color: var(--tone); border: 1px solid var(--tone); font-weight: 600; cursor: grab; touch-action: none;
+  overflow: hidden; white-space: nowrap;
+}
+.pill-name { overflow: hidden; text-overflow: ellipsis; }
+.pill-table { font-size: 0.7rem; background: var(--surface); border-radius: 4px; padding: 0 4px; flex-shrink: 0; }
+.acell-reason { color: var(--danger); font-size: 0.65rem; line-height: 1.2; margin-top: 2px; }
+.acell-del {
+  position: absolute; top: -6px; right: -6px; width: 20px; height: 20px; min-height: 20px; padding: 0; border-radius: 50%;
+  font-size: 0.75rem; line-height: 1; display: none; background: var(--surface); color: var(--danger); border-color: var(--danger);
+}
+.acell.assigned:hover .acell-del { display: inline-flex; }
+.acell.drop-ok { outline: 3px solid var(--on); }
+.acell.drop-warn { outline: 3px solid var(--warn); }
+.acell.drop-no { outline: 3px solid var(--danger); }
+body.dragging, body.dragging * { cursor: grabbing !important; user-select: none; }
+.drag-ghost {
+  position: fixed; z-index: 60; pointer-events: none; padding: 4px 10px; border-radius: 6px; font-weight: 700; font-size: 0.85rem;
+  background: var(--tone-weak); color: var(--tone); border: 1px solid var(--tone); box-shadow: var(--shadow);
+}
+.drag-ghost[data-reason]::after { content: attr(data-reason); display: block; font-weight: 400; font-size: 0.7rem; color: var(--text); }
+
+.teacher-list { display: flex; flex-direction: column; gap: 6px; }
+.teacher-item { justify-content: space-between; text-align: left; width: 100%; }
+.teacher-item:hover { background: var(--primary-weak); }
+.teacher-item.conflict { border-color: var(--warn); }
+.warn-text { color: var(--warn); font-size: 0.85rem; }
+
+.badge.op-add { background: var(--on-weak); color: var(--on); }
+.badge.op-change { background: var(--primary-weak); color: var(--primary); }
+.badge.op-delete { background: var(--danger-weak); color: var(--danger); }
+.comiru-plan .result.ok { color: var(--on); font-weight: 600; }
+.comiru-plan .result.ng { color: var(--danger); font-weight: 600; }
+
+/* 割り当て画面：上部は画面に貼り付け、高さを変えない（カレンダーがずれないように） */
+.assign-head { position: sticky; top: 0; z-index: 15; background: var(--bg); padding-top: 4px; }
+.assign-head .card { margin-bottom: 8px; }
+.palette { height: 52px; flex-wrap: nowrap; overflow-x: auto; overflow-y: hidden; margin-bottom: 4px; white-space: nowrap; }
+.palette > * { flex-shrink: 0; }
+.palette-panel { margin-bottom: 4px; }
+.palette-panel.brushing { background: var(--on-weak); border-radius: var(--radius); padding: 4px 8px; }
+.palette-heading { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+.palette-heading > span { min-width: 0; }
+.palette-heading > button { flex-shrink: 0; }
+.palette-panel .palette:empty { display: none; }
+.assignment-save-status { margin-top: 8px; font-size: 0.85rem; color: var(--muted); }
+.seat-preview { max-height: 220px; overflow-y: auto; padding: 4px 0; }
+.brush-note { color: var(--on); font-weight: 600; font-size: 0.85rem; }
+.teacher-chip.active { box-shadow: 0 0 0 3px var(--on); }
+.conflict-line { position: relative; font-size: 0.9rem; padding: 4px 2px 8px; min-height: 30px; }
+.conflict-line.ok { color: var(--on); }
+.conflict-line.ng .btn-link { color: var(--danger); font-weight: 700; padding: 0; }
+.conflict-pop {
+  position: absolute; left: 0; right: 0; top: 100%; z-index: 20; max-height: 50vh; overflow-y: auto;
+  background: var(--danger-weak); color: var(--danger); border: 1px solid var(--danger); border-radius: var(--radius);
+  padding: 8px 12px; box-shadow: var(--shadow);
+}
+.conflict-pop .btn-link { text-decoration: underline; }
+
+/* 連続入力中のコマ */
+.acell.brush-ok { outline: 2px solid var(--on); background: var(--on-weak); cursor: copy; }
+.acell.brush-ok .hint { color: var(--on); font-weight: 700; }
+.acell.brush-warn { outline: 2px solid var(--warn); background: var(--warn-weak); cursor: copy; }
+.acell.brush-warn .hint { color: var(--warn); font-weight: 700; }
+.acell.brush-no { opacity: 0.45; cursor: not-allowed; }
+.acell.saving { animation: saving 0.8s ease-in-out infinite alternate; }
+.saving-label {
+  position: absolute; inset: 1px; z-index: 1; pointer-events: none; display: flex; align-items: center; justify-content: center;
+  padding: 2px; border: 2px dashed var(--primary); border-radius: 5px;
+  background: var(--primary-weak); color: #1e40af; font-size: 0.7rem; font-weight: 600; line-height: 1.25;
+}
+@keyframes saving { from { background: var(--primary-weak); } to { background: var(--surface); } }
+.acell.selecting { outline: 3px solid var(--primary); }
+
+/* 講師を選ぶ欄（コマの横に出す） */
+.popover-layer { position: fixed; inset: 0; z-index: 40; }
+.popover {
+  position: fixed; width: 340px; max-width: calc(100vw - 16px); max-height: calc(100vh - 16px); overflow-y: auto; background: var(--surface);
+  border: 1px solid var(--border); border-radius: var(--radius); box-shadow: 0 8px 24px rgba(0, 0, 0, 0.18); padding: 12px;
+}
+.teacher-row { display: flex; gap: 6px; }
+.teacher-row .teacher-item { flex: 1; min-height: 38px; padding: 6px 10px; }
+.teacher-item:focus { outline: 2px solid var(--primary); }
+.brush-btn { white-space: nowrap; }
+kbd {
+  display: inline-block; min-width: 1.4em; margin-right: 6px; padding: 0 4px; border: 1px solid var(--border); border-radius: 4px;
+  font-size: 0.75rem; color: var(--muted); text-align: center; background: var(--bg);
+}
+
+@media (max-width: 480px) {
+  .assign-table .assign-month, .assign-table .hint-detail { display: none; }
+  .assign-table .pill { flex-direction: column; gap: 1px; padding: 2px 0; }
+  .assign-table .pill-name { max-width: 100%; font-size: 0.7rem; }
+  .assign-table .pill-table { font-size: 0.6rem; }
+}
+
+/* 押した直後でまだサーバーに保存できていないコマ（すぐ表示し、裏で保存する） */
+.acell.pending .pill { border-style: dashed; opacity: 0.85; }
+.acell.pending::after {
+  content: ""; position: absolute; right: 4px; bottom: 4px; width: 6px; height: 6px; border-radius: 50%;
+  background: var(--primary); animation: pending-dot 0.9s ease-in-out infinite alternate;
+}
+@keyframes pending-dot { from { opacity: 0.2; } to { opacity: 1; } }
+.badge.op-move { background: var(--primary-weak); color: var(--primary); }

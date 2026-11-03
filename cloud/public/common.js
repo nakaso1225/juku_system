@@ -1,9 +1,10 @@
 // 講師ページ・管理画面で共通の小物
 
 export class ApiError extends Error {
-  constructor(status, message) {
+  constructor(status, message, data = {}) {
     super(message);
     this.status = status;
+    this.data = data; // サーバーが返した内容（確認が必要な一覧など）
   }
 }
 
@@ -15,7 +16,7 @@ export async function api(path, { method = "GET", body } = {}) {
     credentials: "same-origin",
   });
   const data = await res.json().catch(() => ({}));
-  if (!res.ok) throw new ApiError(res.status, data.error || `エラーが発生しました（${res.status}）`);
+  if (!res.ok) throw new ApiError(res.status, data.error || `エラーが発生しました（${res.status}）`, data);
   return data;
 }
 
@@ -63,7 +64,7 @@ export function el(tag, attrs = {}, ...children) {
     else if (key === "dataset") Object.assign(node.dataset, value);
     else node.setAttribute(key, value === true ? "" : value);
   }
-  for (const child of children.flat()) {
+  for (const child of children.flat(Infinity)) {
     if (child === undefined || child === null || child === false) continue;
     node.append(child instanceof Node ? child : String(child));
   }

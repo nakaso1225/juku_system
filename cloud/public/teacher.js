@@ -27,7 +27,7 @@ function isDirty() {
 }
 
 window.addEventListener("beforeunload", (e) => {
-  if (isDirty()) {
+  if (state.saving || isDirty()) {
     e.preventDefault();
     e.returnValue = "";
   }
@@ -68,11 +68,10 @@ function renderLogin() {
   );
 }
 
-// ------------------------------------------------------------ 氏名・科目のフォーム（登録・編集で共通）
+// ------------------------------------------------------------ 指導できる科目のフォーム（初回・編集で共通）
 
-function profileForm({ name = "", subjects = [] }, { submitLabel, onSubmit, onCancel }) {
+function subjectsForm(subjects, { submitLabel, onSubmit, onCancel }) {
   const chosen = new Set(subjects);
-  const nameInput = el("input", { type: "text", value: name, placeholder: "例：山田太郎", autocomplete: "name" });
   const chips = el(
     "div",
     { class: "chips" },
@@ -87,7 +86,6 @@ function profileForm({ name = "", subjects = [] }, { submitLabel, onSubmit, onCa
     }),
   );
   const submit = el("button", { type: "submit", class: "btn-primary" }, submitLabel);
-
   return el(
     "form",
     {
@@ -95,7 +93,7 @@ function profileForm({ name = "", subjects = [] }, { submitLabel, onSubmit, onCa
         e.preventDefault();
         submit.disabled = true;
         try {
-          await onSubmit({ name: nameInput.value, subjects: [...chosen] });
+          await onSubmit([...chosen]);
         } catch (err) {
           toast(err.message, true);
         } finally {
@@ -104,34 +102,80 @@ function profileForm({ name = "", subjects = [] }, { submitLabel, onSubmit, onCa
       },
     },
     el(
-      "label",
-      { class: "field" },
-      el("span", {}, "氏名（comiruと同じ表記・姓と名の間にスペースなし）"),
-      nameInput,
+      "p",
+      { class: "notice warn", style: "margin:0 0 10px;padding:8px 10px;font-size:0.9rem" },
+      "レギュラーで担当している生徒の科目は、必ず含めてください。",
     ),
-    el("div", { class: "field" }, el("span", { style: "display:block;font-weight:600;margin-bottom:6px" }, "指導できる科目"), chips),
-    el("div", { class: "row" }, submit, onCancel ? el("button", { type: "button", onclick: onCancel }, "やめる") : null),
+    chips,
+    el("div", { class: "row", style: "margin-top:14px" }, submit, onCancel ? el("button", { type: "button", onclick: onCancel }, "やめる") : null),
   );
 }
 
-function renderRegister() {
-  app.replaceChildren(
+// ------------------------------------------------------------ comiru の講師と紐付いていないとき
+
+function renderLinkForm() {
+  const nameInput = el("input", { type: "text", placeholder: "例：山田太郎", autocomplete: "name" });
+  const submit = el("button", { type: "submit", class: "btn-primary" }, "申請する");
+  show(
     topbar(),
     el(
       "div",
       { class: "card" },
-      el("h2", {}, "はじめに講師登録をしてください"),
-      el("p", { class: "muted" }, "登録後、事務が確認します。確認を待つ間も予定は入力できます。"),
-      profileForm(
+      el("h2", {}, "はじめての方へ"),
+      el(
+        "p",
         {},
+        `このGoogleアカウント（${state.me.user.email}）は、comiru に登録されているメールアドレスと一致しませんでした。`,
+      ),
+      el(
+        "p",
+        { class: "muted" },
+        "comiru に登録しているアドレスの Google アカウントがあれば、いったんログアウトしてそちらでログインしてください。すぐに使えます。",
+      ),
+      el("p", { class: "muted" }, "このアカウントのまま使う場合は、名前を入れて申請してください。事務が確認すると使えるようになります（最初の1回だけです）。"),
+      el(
+        "form",
         {
-          submitLabel: "登録する",
-          onSubmit: async (values) => {
-            await api("/api/teacher/register", { method: "POST", body: values });
-            toast("登録しました");
+          onsubmit: async (e) => {
+            e.preventDefault();
+            submit.disabled = true;
+            try {
+              await api("/api/teacher/link-request", { method: "POST", body: { name: nameInput.value } });
+              toast("✓ 申請しました");
+              await start();
+            } catch (err) {
+              toast(err.message, true);
+            } finally {
+              submit.disabled = false;
+            }
+          },
+        },
+        el("label", { class: "field" }, el("span", {}, "名前（comiru と同じ漢字で）"), nameInput),
+        submit,
+      ),
+    ),
+  );
+}
+
+function renderRequested(request) {
+  show(
+    topbar(),
+    el(
+      "div",
+      { class: "card" },
+      el("h2", {}, "事務の確認待ちです"),
+      el("p", {}, `「${request.requested_name}」として申請しました（${fmtDateTime(request.created_at)}）。`),
+      el("p", { class: "muted" }, "事務が確認すると、このページで予定を入力できるようになります。少し時間をおいて、もう一度開いてください。"),
+      el(
+        "button",
+        {
+          type: "button",
+          onclick: async () => {
+            await api("/api/teacher/link-request", { method: "DELETE" });
             await start();
           },
         },
+        "申請を取り消して入れ直す",
       ),
     ),
   );
@@ -148,66 +192,115 @@ function profileCard() {
         "div",
         { class: "row", style: "justify-content:space-between" },
         el("h2", { style: "margin:0" }, p.name),
-        el("button", { type: "button", class: "btn-small", onclick: showEdit }, "編集"),
+        el("button", { type: "button", class: "btn-small", onclick: showEdit }, "科目を編集"),
       ),
-      el("p", { class: "muted", style: "margin-top:4px" }, p.email),
+      el("p", { class: "muted", style: "margin-top:4px" }, p.google_email || state.me.user.email),
       el("div", { class: "chips" }, p.subjects.map((s) => el("span", { class: "badge" }, s))),
     );
   const showEdit = () =>
     card.replaceChildren(
-      el("h2", {}, "登録情報の編集"),
-      profileForm(p, {
+      el("h2", {}, "指導できる科目"),
+      subjectsForm(p.subjects, {
         submitLabel: "保存する",
         onCancel: showView,
-        onSubmit: async (values) => {
-          await api("/api/teacher/profile", { method: "PATCH", body: values });
-          state.profile = (await api("/api/teacher/profile")).teacher;
-          Object.assign(p, state.profile);
-          toast("登録情報を保存しました");
+        onSubmit: async (subjects) => {
+          await api("/api/teacher/profile", { method: "PATCH", body: { subjects } });
+          p.subjects = (await api("/api/teacher/profile")).teacher.subjects;
+          toast("✓ 指導できる科目を保存しました");
           showView();
         },
       }),
-      el("p", { class: "muted", style: "margin-top:8px" }, "メールアドレスはログイン中のGoogleアカウントのものが使われます。"),
     );
   showView();
   return card;
 }
 
+/** 初回：指導できる科目を選んでもらう */
+function renderFirstSubjects() {
+  show(
+    topbar(),
+    el(
+      "div",
+      { class: "card" },
+      el("h2", {}, `${state.profile.name} さん、ようこそ`),
+      el("p", { class: "muted" }, "はじめに、指導できる科目を選んでください。あとから変更できます。"),
+      subjectsForm([], {
+        submitLabel: "次へ",
+        onSubmit: async (subjects) => {
+          await api("/api/teacher/profile", { method: "PATCH", body: { subjects } });
+          await renderMain();
+        },
+      }),
+    ),
+  );
+}
+
+// 画面下の保存バーと、講習カード上部の提出状況を今の状態に合わせる
+//   未提出 → 灰色「まだ提出していません」＋「提出する」
+//   未保存 → 黄色「保存していない変更があります」＋「保存する」
+//   保存済 → 緑色「✓ 保存しました（時刻）」＋「保存済み」（押せない）
 function updateSaveBar() {
+  const bar = document.getElementById("savebar");
   const status = document.getElementById("save-status");
   const button = document.getElementById("save-button");
-  if (!status || !button) return;
+  const termStatus = document.getElementById("term-status");
+  if (!bar || !status || !button) return;
+
   const dirty = isDirty();
+  const submitted = Boolean(state.termData.updated_at);
   const count = `${state.selected.size}コマ選択中`;
-  if (dirty) {
-    status.textContent = `${count}・未保存`;
-  } else if (state.termData.updated_at) {
-    status.textContent = `${count}・保存済み ${fmtDateTime(state.termData.updated_at)}`;
+  const savedAt = submitted ? fmtDateTime(state.termData.updated_at) : "";
+
+  bar.classList.toggle("dirty", dirty);
+  bar.classList.toggle("saved", !dirty && submitted && !state.saving);
+
+  if (state.saving) {
+    status.textContent = "保存中…";
+    button.textContent = "保存中…";
+  } else if (dirty) {
+    status.textContent = `${count}・保存していない変更があります`;
+    button.textContent = submitted ? "保存する" : "提出する";
+  } else if (submitted) {
+    status.textContent = `✓ 保存しました（${savedAt}）・${count}`;
+    button.textContent = "保存済み";
   } else {
-    status.textContent = `${count}・未提出`;
+    status.textContent = `${count}・まだ提出していません`;
+    button.textContent = "提出する";
   }
-  status.classList.toggle("dirty", dirty || !state.termData.updated_at);
-  button.disabled = state.saving || (!dirty && Boolean(state.termData.updated_at));
-  button.textContent = state.termData.updated_at ? "保存する" : "提出する";
+  button.disabled = state.saving || (!dirty && submitted);
+
+  if (termStatus) {
+    termStatus.replaceChildren(
+      submitted
+        ? el("span", { class: "badge ok" }, `✓ 提出済み・最終保存 ${savedAt}`)
+        : el("span", { class: "badge warn" }, "未提出"),
+    );
+  }
 }
 
 async function save() {
+  if (state.saving) return;
   const note = document.getElementById("term-note").value;
+  const selected = new Set(state.selected);
+  const termData = state.termData;
   if (state.selected.size === 0 && !confirm("1コマも選ばれていません。「この講習は来られない」として保存しますか？")) return;
   state.saving = true;
   updateSaveBar();
   try {
-    const firstTime = !state.termData.updated_at;
-    const res = await api(`/api/teacher/terms/${state.termData.term.id}`, {
+    const res = await api(`/api/teacher/terms/${termData.term.id}`, {
       method: "PUT",
-      body: { slots: keysToSlots(state.selected), note },
+      body: { slots: keysToSlots(selected), note },
     });
-    state.savedKeys = new Set(state.selected);
+    state.savedKeys = selected;
     state.savedNote = note;
-    state.termData.updated_at = res.updated_at;
-    toast(firstTime ? "提出しました。変更があればいつでも直せます" : "保存しました");
+    termData.updated_at = res.updated_at;
+    const term = state.terms.find((t) => t.id === termData.term.id);
+    if (term) term.updated_at = res.updated_at;
+    const chip = document.querySelector(`[data-term-id="${termData.term.id}"]`);
+    if (chip && term) chip.textContent = `${term.name} ✓`;
+    toast(res.first_submission ? "✓ 提出しました。変更があればいつでも直せます" : "✓ 保存しました");
   } catch (err) {
-    toast(err.message, true);
+    toast(`保存できませんでした：${err.message}`, true);
   } finally {
     state.saving = false;
     updateSaveBar();
@@ -215,13 +308,15 @@ async function save() {
 }
 
 async function loadTerm(termId) {
-  if (isDirty() && !confirm("保存していない変更があります。破棄して切り替えますか？")) return;
+  if (state.saving) { toast("保存中です。完了してから切り替えてください"); return false; }
+  if (isDirty() && !confirm("保存していない変更があります。破棄して切り替えますか？")) return false;
   const data = await api(`/api/teacher/terms/${termId}`);
   state.termData = data;
   state.selected = new Set(data.slots.map((s) => slotKey(s.date, s.period)));
   state.savedKeys = new Set(state.selected);
   state.savedNote = data.note;
   renderTermSection();
+  return true;
 }
 
 function renderTermSection() {
@@ -236,7 +331,7 @@ function renderTermSection() {
     el(
       "div",
       { class: "card" },
-      el("h2", {}, term.name),
+      el("div", { class: "row", style: "justify-content:space-between;margin-bottom:6px" }, el("h2", { style: "margin:0" }, term.name), el("div", { id: "term-status" })),
       el(
         "p",
         { class: "muted" },
@@ -257,10 +352,7 @@ async function renderMain() {
   state.profile = teacher;
   state.terms = terms;
 
-  const notices = [];
-  if (teacher.status === "pending") {
-    notices.push(el("div", { class: "notice warn" }, "事務の確認待ちです。予定の入力はこのまま進めてください。"));
-  }
+  if (!teacher.subjects.length) return renderFirstSubjects();
 
   const termPicker =
     terms.length > 1
@@ -279,8 +371,8 @@ async function renderMain() {
                   class: "chip",
                   dataset: { termId: t.id },
                   onclick: async (e) => {
-                    await loadTerm(t.id);
-                    document.querySelectorAll("[data-term-id]").forEach((c) => c.classList.toggle("on", c === e.currentTarget));
+                    const changed = await loadTerm(t.id);
+                    if (changed) document.querySelectorAll("[data-term-id]").forEach((c) => c.classList.toggle("on", Number(c.dataset.termId) === state.termData.term.id));
                   },
                 },
                 t.name,
@@ -304,7 +396,6 @@ async function renderMain() {
 
   show(
     topbar(),
-    ...notices,
     profileCard(),
     terms.length ? termPicker : el("div", { class: "notice info" }, "現在、予定の入力を受け付けている講習はありません。"),
     el("div", { id: "term-section" }),
@@ -328,14 +419,13 @@ async function start() {
     return;
   }
   state.meta = await api("/api/meta");
-  const teacher = state.me.teacher;
-  if (!teacher) return renderRegister();
-  if (teacher.status === "rejected") {
-    app.replaceChildren(
-      topbar(),
-      el("div", { class: "notice danger" }, "この講師登録は承認されませんでした。心当たりがない場合は事務にお問い合わせください。"),
-    );
+  if (state.me.teacher_inactive) {
+    // comiru の講師名簿から外れた講師（ログイン済みでも使えない）
+    show(topbar(), el("div", { class: "notice danger" }, "comiru の講師名簿にいないため、このページは使えません。心当たりがない場合は事務にお問い合わせください。"));
     return;
+  }
+  if (!state.me.teacher) {
+    return state.me.link_request ? renderRequested(state.me.link_request) : renderLinkForm();
   }
   await renderMain();
 }
