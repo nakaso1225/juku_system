@@ -355,3 +355,59 @@ test('生徒の予定を2人が同時に直したら、あとの保存を 409 �
   await api(base + '/students/3', { method: 'PUT', body: { ...body, note: '担当B（開き直した）', expected_rev: first.rev } });
 });
 
+
+// ---------------------------------------------------------------- 事務による講師の予定の代理入力と変更履歴
+
+const keysOf = (slots) => slots.map((s) => `${s.date}#${s.period}`).sort();
+
+test('事務は講師の予定を代わりに入力でき、誰がいつ何を変えたかが履歴に残る', async () => {
+  const detail = await api(base + '/teachers/3');
+  assert.equal(detail.rev, null);
+  const slots = [...detail.slots, { date: '2026-12-22', period: 3 }];
+  await api(base + '/teachers/3/availability', { method: 'PUT', body: { slots, note: '' }, status: 400 }); // expected_rev は必須
+  const saved = await api(base + '/teachers/3/availability', { method: 'PUT', body: { slots, note: '水曜は午後から', reason: '電話で連絡', expected_rev: null } });
+  assert.equal(saved.rev, 0);
+  // 同じ「まだ入力がない」画面からの2回目は、先の保存を上書きしない
+  await api(base + '/teachers/3/availability', { method: 'PUT', body: { slots: [], note: '', expected_rev: null }, status: 409 });
+  const after = await api(base + '/teachers/3');
+  assert.deepEqual(keysOf(after.slots), keysOf(slots));
+  assert.equal(after.note, '水曜は午後から');
+  const [h] = after.history;
+  assert.equal(h.actor_role, 'staff');
+  assert.equal(h.actor_email, 'api-test@example.invalid');
+  assert.equal(h.reason, '電話で連絡');
+  assert.deepEqual(keysOf(h.added), ['2026-12-22#3']);
+  assert.equal(h.note_after, '水曜は午後から');
+  // 事務が自分で入れた予定は「変更のお知らせ」に出さない
+  assert.equal((await api(base + '/changes')).some((d) => d.teacher_id === 3), false);
+});
+
+test('本人と事務が同時に直したら、あとの保存を止める。事務の代理入力で本人の変更のお知らせは消えない', async () => {
+  const mine = await api('/teacher/terms/1');
+  const original = mine.slots;
+  let rev = (await api('/teacher/terms/1', { method: 'PUT', body: { slots: original, note: '', expected_rev: mine.rev } })).rev;
+  // 本人が 12/24 を足した（事務へのお知らせになる）
+  rev = (await api('/teacher/terms/1', { method: 'PUT', body: { slots: [...original, { date: '2026-12-24', period: 2 }], note: '', expected_rev: rev } })).rev;
+  let detail = await api(base + '/teachers/1');
+  assert.equal(detail.rev, rev);
+  assert.deepEqual(keysOf(detail.added), ['2026-12-24#2']);
+  // 事務が電話を受けて 12/23 を外した
+  const staffSlots = detail.slots.filter((s) => s.date !== '2026-12-23');
+  const staff = await api(base + '/teachers/1/availability', { method: 'PUT', body: { slots: staffSlots, note: '', reason: 'LINE', expected_rev: detail.rev } });
+  // 本人の古い画面からの保存は止める（事務が外したコマを戻してしまわない）
+  const stale = await api('/teacher/terms/1', { method: 'PUT', body: { slots: [...original, { date: '2026-12-24', period: 2 }], note: '', expected_rev: rev }, status: 409 });
+  assert.match(stale.error, /事務の方/);
+  // 事務の古い画面からの保存も止める
+  await api(base + '/teachers/1/availability', { method: 'PUT', body: { slots: original, note: '', expected_rev: detail.rev }, status: 409 });
+  detail = await api(base + '/teachers/1');
+  assert.deepEqual(keysOf(detail.slots), keysOf(staffSlots));
+  assert.deepEqual(keysOf(detail.added), ['2026-12-24#2']); // 本人の変更のお知らせは残る
+  assert.deepEqual(detail.removed, []); // 事務が外した分はお知らせにしない
+  assert.deepEqual(detail.history.slice(0, 2).map((h) => h.actor_role), ['staff', 'teacher']);
+  assert.deepEqual(keysOf(detail.history[0].removed), ['2026-12-23#2']);
+  // 元に戻す（ほかのテストのため）
+  await api(base + '/teachers/1/availability', { method: 'PUT', body: { slots: original, note: '', expected_rev: staff.rev } });
+  detail = await api(base + '/teachers/1');
+  assert.deepEqual(keysOf(detail.slots), keysOf(original));
+  assert.deepEqual([...detail.added, ...detail.removed], []);
+});

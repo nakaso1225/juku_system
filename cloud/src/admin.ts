@@ -6,7 +6,8 @@ import { registerAssignmentRoutes, resetCompletedWithErrors } from "./assignment
 import { registerAssignSyncRoutes } from "./assignSync";
 import { registerComiruSyncRoutes } from "./comiruSync";
 import { registerStudentRoutes } from "./students";
-import { getTerm, HttpError, isSlotInTerm, nowIso, parseTermInput, rowToTerm, termForClient, type Slot } from "./terms";
+import { getTerm, HttpError, isSlotInTerm, nowIso, parseSlots, parseTermInput, rowToTerm, termForClient, type Slot } from "./terms";
+import { saveTeacherAvailability, teacherAvailabilityLog } from "./teacherAvailability";
 import type { AppEnv, Env } from "./types";
 import { registerSettingsRoutes } from "./settings";
 import { compareNames, parseKana, PERSON_KANA_SQL } from "./roster";
@@ -319,7 +320,7 @@ adminApi.get("/terms/:termId/teachers/:teacherId", async (c) => {
       .bind(term.id, teacherId)
       .all<Slot>(),
     c.env.DB.prepare(
-      "SELECT note, submitted_at, updated_at, reviewed_at FROM teacher_term_entries WHERE term_id = ? AND teacher_id = ?",
+      "SELECT note, submitted_at, updated_at, reviewed_at, rev FROM teacher_term_entries WHERE term_id = ? AND teacher_id = ?",
     )
       .bind(term.id, teacherId)
       .first(),
@@ -334,7 +335,30 @@ adminApi.get("/terms/:termId/teachers/:teacherId", async (c) => {
     reviewed_at: entry?.reviewed_at ?? null,
     removed: diff.filter((d) => d.action === "remove"),
     added: diff.filter((d) => d.action === "add"),
+    rev: entry ? Number(entry.rev) : null,
+    history: await teacherAvailabilityLog(c.env.DB, term.id, teacherId),
   });
+});
+
+// 事務による講師の予定の代理入力（電話・LINE で連絡を受けたとき）。受付を締め切った講習でも直せる。変更履歴に事務のアカウントで残す
+adminApi.put("/terms/:termId/teachers/:teacherId/availability", async (c) => {
+  const db = c.env.DB;
+  const term = await getTerm(db, Number(c.req.param("termId")));
+  const teacherId = Number(c.req.param("teacherId"));
+  const teacher = await db.prepare("SELECT id FROM teachers WHERE id = ? AND active = 1").bind(teacherId).first();
+  if (!teacher) throw new HttpError(404, "講師が見つかりません（comiru の講師名簿にいない講師は直せません）");
+  const body = await c.req.json<Record<string, unknown>>();
+  if (body.expected_rev === undefined) throw new HttpError(400, "expected_rev を指定してください");
+  const result = await saveTeacherAvailability(db, {
+    term,
+    teacherId,
+    slots: parseSlots(term, body.slots, { dropOutside: true }),
+    note: String(body.note ?? "").slice(0, 500),
+    actor: { role: "staff", email: c.get("user").email },
+    expectedRev: body.expected_rev === null ? null : Number(body.expected_rev),
+    reason: String(body.reason ?? ""),
+  });
+  return c.json({ ok: true, ...result });
 });
 
 // ---------------------------------------------------------------- 予定の変更（確認後に変わったコマ）

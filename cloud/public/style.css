@@ -480,3 +480,12 @@ kbd {
   .week-navigation select { flex: 1; font-size: 0.8rem; }
   .palette-heading .brush-note { font-size: 0.75rem; }
 }
+
+/* 講師の予定の変更履歴 */
+.history { margin: 8px 0; }
+.history > summary { cursor: pointer; color: var(--muted, #666); }
+.history-list { list-style: none; padding: 0; margin: 8px 0 0; display: grid; gap: 8px; }
+.history-list li { border-left: 3px solid var(--border, #ddd); padding: 4px 0 4px 10px; font-size: 0.9em; }
+.history-head { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin-bottom: 2px; }
+.history-add { color: #1a7f37; }
+.history-remove { color: #c62828; }

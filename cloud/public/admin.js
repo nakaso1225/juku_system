@@ -381,15 +381,14 @@ function linkRequestsCard(requests) {
 async function openTeacherModal(t, term) {
   const data = await api(`/api/admin/terms/${term.id}/teachers/${t.id}`);
   const selected = new Set(data.slots.map((s) => slotKey(s.date, s.period)));
-  const calendarRoot = el("div");
   const kana = el("input", { type: "text", value: t.name_kana || "", placeholder: "例：やまだ たろう", maxlength: "100" });
   let savedKana = kana.value;
   let savingKana = false;
   let changedKana = false;
   editorDirty = () => savingKana || kana.value !== savedKana;
   const close = () => {
-    if (savingKana) { toast("保存中です。完了してから閉じてください"); return false; }
-    if ((kana.value !== savedKana || loginEmail.value !== savedEmail) && !confirm("保存していない変更があります。閉じてよろしいですか？")) return false;
+    if (savingKana || savingSlots) { toast("保存中です。完了してから閉じてください"); return false; }
+    if ((kana.value !== savedKana || loginEmail.value !== savedEmail || scheduleDirty()) && !confirm("保存していない変更があります。閉じてよろしいですか？")) return false;
     backdrop.remove();
     editorDirty = () => false;
     if (changedKana) render();
@@ -411,7 +410,7 @@ async function openTeacherModal(t, term) {
 
   const loginEmail = el("input", { type: "email", value: t.login_email_override ?? t.google_email ?? t.email ?? "", autocomplete: "off", maxlength: "254" });
   let savedEmail = loginEmail.value;
-  editorDirty = () => savingKana || kana.value !== savedKana || loginEmail.value !== savedEmail;
+  editorDirty = () => savingKana || savingSlots || kana.value !== savedKana || loginEmail.value !== savedEmail || scheduleDirty();
   const saveEmail = el("button", { type: "button", class: "btn-small", onclick: async () => {
     if (savingKana) return;
     const email = loginEmail.value.trim().toLowerCase();
@@ -433,6 +432,170 @@ async function openTeacherModal(t, term) {
     saveEmail,
   );
 
+  // ---- この講習の予定：見る／事務が代わりに直す（電話・LINE で連絡を受けたとき）＋変更履歴
+  let rev = data.rev ?? null;
+  let savedKeys = new Set(selected);
+  let savedNote = data.note ?? "";
+  let editing = null; // 直している最中なら { draft:Set, note, reason }（入力欄）
+  let savingSlots = false;
+  const scheduleSection = el("section", { class: "teacher-schedule" });
+  const sameKeys = (a, b) => a.size === b.size && [...a].every((k) => b.has(k));
+  function scheduleDirty() {
+    return Boolean(editing) && (!sameKeys(editing.draft, savedKeys) || editing.note.value !== savedNote || editing.reason.value.trim() !== "");
+  }
+  const slotLabel = (x) => `${fmtDate(x.date)} ${x.period}限`;
+  const slotText = (list) => (list.length > 10 ? `${list.slice(0, 10).map(slotLabel).join("、")} ほか${list.length - 10}コマ` : list.map(slotLabel).join("、"));
+  const historyView = () => {
+    const items = data.history ?? [];
+    if (!items.length) return el("p", { class: "muted" }, "変更履歴：まだありません");
+    return el(
+      "details",
+      { class: "history" },
+      el("summary", {}, `変更履歴（${items.length}件${items.some((h) => h.actor_role === "staff") ? "・事務の代理入力あり" : ""}）`),
+      el(
+        "ul",
+        { class: "history-list" },
+        items.map((h) =>
+          el(
+            "li",
+            {},
+            el(
+              "div",
+              { class: "history-head" },
+              el("span", { class: `badge${h.actor_role === "staff" ? " warn" : ""}` }, h.actor_role === "staff" ? "事務が代理入力" : "本人"),
+              el("span", {}, fmtDateTime(h.created_at)),
+              h.actor_role === "staff" ? el("span", { class: "muted" }, h.actor_email) : null,
+            ),
+            h.reason ? el("div", {}, `理由：${h.reason}`) : null,
+            h.added.length ? el("div", { class: "history-add" }, `＋ 来られる：${slotText(h.added)}`) : null,
+            h.removed.length ? el("div", { class: "history-remove" }, `− 来られなくなった：${slotText(h.removed)}`) : null,
+            h.note_after != null ? el("div", { class: "muted" }, `備考：「${h.note_before || "なし"}」→「${h.note_after || "なし"}」`) : null,
+            !h.added.length && !h.removed.length && h.note_after == null ? el("div", { class: "muted" }, "提出（コマの変更なし）") : null,
+          ),
+        ),
+      ),
+    );
+  };
+  const reload = async () => {
+    const fresh = await api(`/api/admin/terms/${term.id}/teachers/${t.id}`);
+    Object.assign(data, fresh);
+    rev = fresh.rev ?? null;
+    savedKeys = new Set(fresh.slots.map((x) => slotKey(x.date, x.period)));
+    savedNote = fresh.note ?? "";
+  };
+  const drawSchedule = () => {
+    const cal = el("div");
+    const summary = el(
+      "p",
+      { class: "muted", style: "margin-top:12px" },
+      data.updated_at ? `${term.name}：最終更新 ${fmtDateTime(data.updated_at)}・${savedKeys.size}コマ` : `${term.name}：まだ提出していません`,
+    );
+    if (!editing) {
+      scheduleSection.replaceChildren(
+        summary,
+        savedNote ? el("div", { class: "notice info" }, `備考：${savedNote}`) : null,
+        data.updated_at ? cal : null,
+        el(
+          "div",
+          { class: "row", style: "margin:8px 0" },
+          el(
+            "button",
+            {
+              type: "button",
+              class: "btn-small",
+              onclick: () => {
+                editing = {
+                  draft: new Set(savedKeys),
+                  note: el("textarea", { rows: "2", maxlength: "500" }),
+                  reason: el("input", { type: "text", maxlength: "200", placeholder: "例：11/4 電話で連絡あり" }),
+                };
+                editing.note.value = savedNote;
+                drawSchedule();
+              },
+            },
+            data.updated_at ? "予定を代わりに直す" : "予定を代わりに入力する",
+          ),
+          el("span", { class: "muted" }, "電話・LINE で連絡を受けたときに使います。直した人と内容は履歴に残ります。"),
+        ),
+        historyView(),
+      );
+      if (data.updated_at) renderCalendar(cal, data.term, savedKeys, { editable: false });
+      return;
+    }
+    const count = el("span", { class: "muted" });
+    const update = () => {
+      const added = [...editing.draft].filter((k) => !savedKeys.has(k)).length;
+      const removed = [...savedKeys].filter((k) => !editing.draft.has(k)).length;
+      count.textContent = `${editing.draft.size}コマ${added || removed ? `（＋${added}・−${removed}）` : "（変更なし）"}`;
+    };
+    const saveBtn = el(
+      "button",
+      {
+        type: "button",
+        class: "btn-primary btn-small",
+        onclick: async () => {
+          if (savingSlots) return;
+          if (!editing.draft.size && !confirm(`${t.name}さんの予定を「1コマも来られない」として保存しますか？`)) return;
+          savingSlots = true;
+          saveBtn.disabled = true;
+          try {
+            const res = await api(`/api/admin/terms/${term.id}/teachers/${t.id}/availability`, {
+              method: "PUT",
+              body: { slots: keysToSlots(editing.draft), note: editing.note.value, reason: editing.reason.value.trim(), expected_rev: rev },
+            });
+            editing = null;
+            changedKana = true; // 閉じたときに一覧を描き直す
+            await reload();
+            toast(res.changed ? `${t.name}さんの予定を代わりに保存しました（履歴に残りました）` : "変更はありませんでした");
+          } catch (err) {
+            if (err instanceof ApiError && err.status === 409) {
+              if (confirm(`${err.message}\n\n最新の予定を読み込みますか？（いま直した内容は消えます）`)) {
+                editing = null;
+                await reload().catch((e) => toast(e.message, true));
+              }
+            } else {
+              toast(err.message, true);
+            }
+          } finally {
+            savingSlots = false;
+            saveBtn.disabled = false;
+            drawSchedule();
+          }
+        },
+      },
+      "代わりに保存",
+    );
+    scheduleSection.replaceChildren(
+      summary,
+      el("div", { class: "notice warn" }, `${t.name}さんの予定を事務が代わりに直しています。保存すると本人の画面にもこの予定が出ます（受付を締め切った講習でも直せます）。`),
+      cal,
+      el("div", { class: "row", style: "margin:6px 0" }, count),
+      el("label", { class: "field" }, el("span", {}, "備考（本人の画面にも出ます）"), editing.note),
+      el("label", { class: "field" }, el("span", {}, "理由・連絡の手段（履歴に残ります）"), editing.reason),
+      el(
+        "div",
+        { class: "row" },
+        saveBtn,
+        el(
+          "button",
+          {
+            type: "button",
+            class: "btn-small",
+            onclick: () => {
+              if (scheduleDirty() && !confirm("直した内容を破棄しますか？")) return;
+              editing = null;
+              drawSchedule();
+            },
+          },
+          "やめる",
+        ),
+      ),
+      historyView(),
+    );
+    renderCalendar(cal, data.term, editing.draft, { editable: true, onChange: update });
+    update();
+  };
+
   const backdrop = el(
     "div",
     { class: "modal-backdrop", onclick: (e) => e.target === backdrop && close() },
@@ -448,13 +611,7 @@ async function openTeacherModal(t, term) {
       el("label", { class: "field" }, el("span", {}, "ふりがな（あいうえお順に使用）"), kana),
       saveKana,
       el("p", { class: "muted", style: "margin-top:12px" }, `指導できる科目：${t.subjects || "未登録"}`),
-      el(
-        "p",
-        { class: "muted" },
-        data.updated_at ? `${term.name}：最終更新 ${fmtDateTime(data.updated_at)}・${selected.size}コマ` : `${term.name}：まだ提出していません`,
-      ),
-      data.note ? el("div", { class: "notice info" }, `備考：${data.note}`) : null,
-      data.updated_at ? calendarRoot : null,
+      scheduleSection,
       accountSection,
       el(
         "div",
@@ -487,7 +644,7 @@ async function openTeacherModal(t, term) {
     ),
   );
   document.body.append(backdrop);
-  if (data.updated_at) renderCalendar(calendarRoot, data.term, selected, { editable: false });
+  drawSchedule();
 }
 
 // ------------------------------------------------------------ 生徒タブ

@@ -27,6 +27,17 @@ export async function replaceSlotsStatements(
   ownerId: number,
   slots: Slot[],
 ): Promise<D1PreparedStatement[]> {
+  return (await replaceSlotsWithDiff(db, owner, termId, ownerId, slots)).statements;
+}
+
+/** replaceSlotsStatements と同じ。増えたコマ・減ったコマ（変更履歴に使う）も返す */
+export async function replaceSlotsWithDiff(
+  db: D1Database,
+  owner: Owner,
+  termId: number,
+  ownerId: number,
+  slots: Slot[],
+): Promise<{ statements: D1PreparedStatement[]; added: Slot[]; removed: Slot[] }> {
   const existing = await readSlots(db, owner, termId, ownerId);
   const key = (s: Slot) => `${s.date}#${s.period}`;
   const before = new Set(existing.map(key));
@@ -58,7 +69,7 @@ export async function replaceSlotsStatements(
         .bind(termId, ownerId, JSON.stringify(added)),
     );
   }
-  return statements;
+  return { statements, added, removed };
 }
 
 const WEEKDAYS = ["日", "月", "火", "水", "木", "金", "土"];

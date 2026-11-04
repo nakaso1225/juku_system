@@ -6,10 +6,10 @@
 // 旧画面からの申請APIは互換用に残す。通常は事務のメール設定だけで利用できる。
 import { Hono } from "hono";
 import { bumpVersion, resetCompletedWithErrors } from "./assignments";
-import { replaceSlotsStatements, TEACHER_SLOTS } from "./availability";
 import { ensureFreshRoster, normalizeName } from "./comiru";
 import { SUBJECTS } from "./constants";
 import { getTerm, HttpError, nowIso, parseSlots, rowToTerm, termForClient, type Slot } from "./terms";
+import { saveTeacherAvailability } from "./teacherAvailability";
 import type { AppEnv, Env, SessionUser } from "./types";
 
 export interface TeacherRow {
@@ -182,7 +182,7 @@ teacherApi.get("/terms/:termId", async (c) => {
       .bind(term.id, teacher.id)
       .all<Slot>(),
     db
-      .prepare("SELECT note, submitted_at, updated_at FROM teacher_term_entries WHERE term_id = ? AND teacher_id = ?")
+      .prepare("SELECT note, submitted_at, updated_at, rev FROM teacher_term_entries WHERE term_id = ? AND teacher_id = ?")
       .bind(term.id, teacher.id)
       .first(),
   ]);
@@ -192,6 +192,7 @@ teacherApi.get("/terms/:termId", async (c) => {
     note: entry?.note ?? "",
     submitted_at: entry?.submitted_at ?? null,
     updated_at: entry?.updated_at ?? null,
+    rev: entry ? Number(entry.rev) : null, // 保存のときに expected_rev として送り返す
   });
 });
 
@@ -206,38 +207,14 @@ teacherApi.put("/terms/:termId", async (c) => {
   const slots = parseSlots(term, body.slots, { dropOutside: true });
   const note = String(body.note ?? "").slice(0, 500);
 
-  const entry = await db
-    .prepare("SELECT submitted_at FROM teacher_term_entries WHERE term_id = ? AND teacher_id = ?")
-    .bind(term.id, teacher.id)
-    .first<{ submitted_at: string }>();
-
-  const now = nowIso();
-  const statements = await replaceSlotsStatements(db, TEACHER_SLOTS, term.id, teacher.id, slots);
-  statements.push(
-    db
-      .prepare(
-        `INSERT INTO teacher_term_entries (term_id, teacher_id, note, submitted_at, updated_at)
-         VALUES (?, ?, ?, ?, ?)
-         ON CONFLICT (term_id, teacher_id) DO UPDATE SET note = excluded.note, updated_at = excluded.updated_at`,
-      )
-      .bind(term.id, teacher.id, note, now, now),
-  );
-  // 初回提出の内容を「事務が把握している予定」の基準にする（コマ割り当て時の変更検知に使う）
-  if (!entry) {
-    statements.push(
-      db.prepare("DELETE FROM availability_baseline WHERE term_id = ? AND teacher_id = ?").bind(term.id, teacher.id),
-      db
-        .prepare(
-          `INSERT INTO availability_baseline (term_id, teacher_id, date, period)
-           SELECT ?, ?, json_extract(value, '$.date'), json_extract(value, '$.period') FROM json_each(?)`,
-        )
-        .bind(term.id, teacher.id, JSON.stringify(slots)),
-    );
-  }
-  // 隠していた講師が予定を入力したら、一覧に戻す（復帰した講師を見落とさないため）
-  statements.push(db.prepare("UPDATE teachers SET hidden = 0 WHERE id = ? AND hidden = 1").bind(teacher.id));
-  statements.push(bumpVersion(db, term.id), resetCompletedWithErrors(db, term.id));
-  await db.batch(statements);
-
-  return c.json({ ok: true, slot_count: slots.length, first_submission: !entry, updated_at: now });
+  const result = await saveTeacherAvailability(db, {
+    term,
+    teacherId: teacher.id,
+    slots,
+    note,
+    actor: { role: "teacher", email: c.get("user").email },
+    // 古い画面（rev を送らない）からの保存は、確認せずに受け付ける
+    expectedRev: body.expected_rev === undefined ? undefined : body.expected_rev === null ? null : Number(body.expected_rev),
+  });
+  return c.json({ ok: true, ...result });
 });

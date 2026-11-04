@@ -122,7 +122,14 @@ async function fixture(page, { teacher = false, setup = () => {} } = {}) {
     if(/\/teachers\/\d+\/profile$/.test(path)){state.teachers[0].name_kana=body.name_kana;return send({ok:true});}
     if(/\/teachers\/\d+\/login-email$/.test(path)){state.teachers[0].login_email_override=body.email;return send({ok:true,email:body.email});}
     if(/\/teachers\/\d+\/visibility$/.test(path)){state.teachers.find(t=>t.id===Number(path.split('/').at(-2))).hidden=body.hidden;return send({ok:true});}
-    if(/\/teachers\/\d+$/.test(path))return send({term,slots,note:'',updated_at:'2026-11-03T09:00:00Z'});
+    if(/\/teachers\/\d+\/availability$/.test(path)){
+      state.proxyWrites=[...(state.proxyWrites??[]),body];
+      if(state.proxyStale) return send({error:'講師本人かほかの事務の方が、先にこの講師の予定を保存しています。'},409);
+      state.proxySlots=body.slots;state.teacherRev=(state.teacherRev??3)+1;
+      state.history=[{id:9,actor_role:'staff',actor_email:'staff@example.invalid',added:[],removed:[{date:'2026-12-21',period:2}],note_before:null,note_after:null,reason:body.reason,created_at:'2026-11-04T01:00:00Z'},...(state.history??[])];
+      return send({ok:true,changed:true,rev:state.teacherRev,slot_count:body.slots.length});
+    }
+    if(/\/teachers\/\d+$/.test(path))return send({term,slots:state.proxySlots??slots,note:'',updated_at:'2026-11-03T09:00:00Z',rev:state.teacherRev??3,history:state.history??[],added:[],removed:[]});
     throw new Error(`Unhandled fixture: ${method} ${path}`);
   });
   await page.goto(teacher?'/':'/admin.html');
@@ -674,3 +681,39 @@ test('設定の下から新規作成と削除を選べ、削除は確認・競�
   await expect(page.getByLabel('講習名',{exact:true})).toHaveValue('冬期講習');
   expect(state.termDeleted).toBe(false);
 });
+
+test('事務が講師の予定を代わりに直し、理由と変更が履歴に出る。先に保存されていたら上書きしない',async({page})=>{
+  const state=await fixture(page);
+  state.teachers=[{id:1,name:'担当講師',name_kana:'たんとうこうし',subjects:subject,linked:true,hidden:false,submitted_at:'2026-11-03T09:00:00Z',slot_count:70}];
+  state.history=[{id:1,actor_role:'teacher',actor_email:'t@example.invalid',added:slots.slice(0,3),removed:[],note_before:null,note_after:null,reason:'',created_at:'2026-11-03T09:00:00Z'}];
+  await page.getByRole('button',{name:'名簿・予定',exact:true}).click();
+  await page.getByRole('button',{name:'講師',exact:true}).click();
+  await page.getByRole('button',{name:'詳細',exact:true}).click();
+  const modal=page.locator('.modal');
+  await expect(modal.locator('.history summary')).toContainText('変更履歴（1件）');
+  await modal.getByRole('button',{name:'予定を代わりに直す',exact:true}).click();
+  await modal.locator('.cal-cell.editable[data-key="2026-12-21#2"]').click();
+  await expect(modal.getByText('69コマ（＋0・−1）')).toBeVisible();
+  await modal.getByLabel('理由・連絡の手段（履歴に残ります）').fill('電話で連絡');
+  // 閉じようとすると、直した内容を捨ててよいか確認する（キャンセル）
+  page.once('dialog',d=>d.dismiss());
+  await modal.getByRole('button',{name:'閉じる',exact:true}).click();
+  await expect(modal).toHaveCount(1);
+  await modal.getByRole('button',{name:'代わりに保存',exact:true}).click();
+  await expect(page.locator('.toast')).toContainText('代わりに保存しました');
+  expect(state.proxyWrites[0]).toMatchObject({reason:'電話で連絡',expected_rev:3});
+  expect(state.proxyWrites[0].slots).toHaveLength(69);
+  await expect(modal.locator('.history summary')).toContainText('事務の代理入力あり');
+  await modal.locator('.history summary').click();
+  await expect(modal.locator('.history-list li').first()).toContainText('理由：電話で連絡');
+  await expect(modal.locator('.history-list li').first()).toContainText('来られなくなった');
+  // 2回目：ほかの人が先に保存していたら 409。読み込み直さなければ、直した内容を残す
+  state.proxyStale=true;
+  await modal.getByRole('button',{name:'予定を代わりに直す',exact:true}).click();
+  await modal.locator('.cal-cell.editable[data-key="2026-12-22#2"]').click();
+  page.once('dialog',d=>{expect(d.message()).toContain('先にこの講師の予定を保存');d.dismiss();});
+  await modal.getByRole('button',{name:'代わりに保存',exact:true}).click();
+  await expect(modal.getByText('68コマ（＋0・−1）')).toBeVisible();
+  expect(state.proxyWrites[1].expected_rev).toBe(4);
+});
+

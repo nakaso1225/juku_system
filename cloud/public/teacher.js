@@ -230,8 +230,9 @@ async function save() {
   try {
     const res = await api(`/api/teacher/terms/${termData.term.id}`, {
       method: "PUT",
-      body: { slots: keysToSlots(selected), note },
+      body: { slots: keysToSlots(selected), note, expected_rev: termData.rev ?? null },
     });
+    termData.rev = res.rev;
     state.savedKeys = selected;
     state.savedNote = note;
     termData.updated_at = res.updated_at;
@@ -241,7 +242,12 @@ async function save() {
     if (chip && term) chip.textContent = `${term.name} ✓`;
     toast(res.first_submission ? "✓ 提出しました。変更があればいつでも直せます" : "✓ 保存しました");
   } catch (err) {
-    toast(`保存できませんでした：${err.message}`, true);
+    if (err instanceof ApiError && err.status === 409) {
+      // 事務の方が電話などで先に直していた。入力中の内容は消さずに知らせる
+      alert(`${err.message}\n\n（いま選んでいるコマは保存されていません。読み込み直すと、事務の方が直した予定が表示されます）`);
+    } else {
+      toast(`保存できませんでした：${err.message}`, true);
+    }
   } finally {
     state.saving = false;
     updateSaveBar();
