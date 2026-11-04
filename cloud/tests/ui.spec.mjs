@@ -241,7 +241,7 @@ test('講師の保存中の追加入力と、キャンセルした講習切り�
 test('削除はすぐ消えて一回だけ送り、元に戻す失敗時にも再試行できる', async({page})=>{
   const state=await fixture(page);state.slowWrites=500;
   await cell(page,term.dates[0]).hover();
-  const del=cell(page,term.dates[0]).getByRole('button',{name:'×',exact:true});
+  const del=cell(page,term.dates[0]).getByRole('button',{name:'この割り当てを削除',exact:true});
   await del.click();
   await expect(cell(page,term.dates[0]).locator('.pill')).toHaveCount(0,{timeout:300});
   await expect(del).toHaveCount(0);
@@ -611,8 +611,8 @@ for(const [occupied,expected] of [[['A','B','C'],'D'],[['A','B','D'],'C']]) {
 test('一週ずつ前後へ進み、登録と生徒・講師の切替で表示中の週を保つ',async({page})=>{
   await fixture(page);
   await expect(page.locator('.assign-table')).toHaveCount(1);
-  await expect(page.getByRole('button',{name:'前の週',exact:true})).toBeDisabled();
-  await page.getByRole('button',{name:'次の週',exact:true}).click();
+  await expect(page.getByRole('button',{name:'‹ 前の週',exact:true})).toBeDisabled();
+  await page.getByRole('button',{name:'次の週 ›',exact:true}).click();
   await expect(page.getByLabel('表示する週')).toHaveValue('1');
   await expect(cell(page,term.dates[0])).toHaveCount(0);
   await cell(page,term.dates[7]).click();
@@ -622,7 +622,7 @@ test('一週ずつ前後へ進み、登録と生徒・講師の切替で表示�
   await page.getByRole('button',{name:'講師から見る',exact:true}).click();
   await expect(page.getByLabel('表示する週')).toHaveValue('1');
   await expect(cell(page,term.dates[7])).toContainText('生徒一');
-  await expect(page.getByRole('button',{name:'次の週',exact:true})).toBeDisabled();
+  await expect(page.getByRole('button',{name:'次の週 ›',exact:true})).toBeDisabled();
 });
 
 test('非表示の講師を見つけて詳細を開かず一覧に戻せる',async({page})=>{
@@ -717,3 +717,47 @@ test('事務が講師の予定を代わりに直し、理由と変更が履歴�
   expect(state.proxyWrites[1].expected_rev).toBe(4);
 });
 
+
+async function grab(page, locator) {
+  const a=await locator.boundingBox();
+  await page.mouse.move(a.x+a.width/2,a.y+a.height/2);
+  await page.mouse.down();
+  await page.mouse.move(a.x+a.width/2+20,a.y+a.height/2+20,{steps:3});
+}
+async function moveTo(page, locator) {
+  const b=await locator.boundingBox();
+  await page.mouse.move(b.x+b.width/2,b.y+b.height/2,{steps:5});
+}
+
+test('授業をドラッグして画面下のゴミ箱に落とすと消え、元に戻せる。×はいつも見えている',async({page})=>{
+  const state=await fixture(page);
+  const source=cell(page,term.dates[0]);
+  await expect(source.locator('.acell-del')).toBeVisible();
+  const box=await source.locator('.acell-del').boundingBox();
+  expect(box.width).toBeGreaterThanOrEqual(22);
+  await grab(page,source.locator('.pill'));
+  const trash=page.locator('.drag-trash');
+  await expect(trash).toBeVisible();
+  await moveTo(page,trash);
+  await expect(trash).toHaveClass(/over/);
+  await page.mouse.up();
+  await expect(trash).toHaveCount(0);
+  await expect(source.locator('.pill')).toHaveCount(0);
+  await expect.poll(()=>state.writes.filter(w=>w.method==='DELETE').length).toBe(1);
+  await page.getByRole('button',{name:'↶ 元に戻す'}).click();
+  await expect(source.locator('.pill')).toHaveCount(1);
+});
+
+test('ドラッグ中に「次の週」の上で止めると週が変わり、ほかの週のコマへ移せる',async({page})=>{
+  const state=await fixture(page);
+  await expect(page.getByLabel('表示する週')).toHaveValue('0');
+  await grab(page,cell(page,term.dates[0]).locator('.pill'));
+  await moveTo(page,page.getByRole('button',{name:'次の週 ›',exact:true}));
+  await expect(page.getByLabel('表示する週')).toHaveValue('1');
+  await moveTo(page,cell(page,term.dates[8]));
+  await page.mouse.up();
+  await expect(cell(page,term.dates[8]).locator('.pill')).toContainText('担当講師');
+  await expect.poll(()=>state.writes.filter(w=>w.method==='PATCH').map(w=>w.body.date)).toEqual([term.dates[8]]);
+  await page.getByRole('button',{name:'‹ 前の週',exact:true}).click();
+  await expect(cell(page,term.dates[0]).locator('.pill')).toHaveCount(0);
+});

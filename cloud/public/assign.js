@@ -620,9 +620,9 @@ async function drained() {
 
 // ------------------------------------------------------------ 描画
 
-function draw() {
+function draw({ force = false } = {}) {
   if (!S.root) return;
-  if (S.drag?.moved) {
+  if (S.drag?.moved && !force) {
     S.needsDraw = true; // ドラッグ中は描き直さない（終わってから）
     return;
   }
@@ -656,8 +656,9 @@ function draw() {
   const y = window.scrollY;
   S.root.replaceChildren(
     el("div", { class: "assign-head" },
-      el("div", { class: "assign-navigation" }, viewSwitch(), weekNavigation()),
-      S.mode === "teacher" ? teacherToolbar() : toolbar(b, students), S.mode === "student" ? palette(b) : null, conflictBar()),
+      S.mode === "teacher" ? teacherToolbar() : toolbar(b, students), S.mode === "student" ? palette(b) : null, conflictBar(),
+      // 表示と週の切替はカレンダーのすぐ上の1行（ドラッグ中も週のボタンの上で少し止めると週が変わる）
+      el("div", { class: "assign-navigation" }, viewSwitch(), weekNavigation())),
     ...[S.mode === "teacher" ? teacherGrid() : grid(b)].filter(Boolean),
   );
   window.scrollTo(0, y);
@@ -1246,9 +1247,9 @@ function weekNavigation() {
     return el("option", { value: index, selected: index === S.weekIndex }, `第${index + 1}週　${fmtDate(days[0], false)}〜${fmtDate(days.at(-1), false)}`);
   }));
   return el("div", { class: "week-navigation", "aria-label": "週の切替" },
-      el("button", { type: "button", class: "btn-small", disabled: S.weekIndex === 0, onclick: () => move(S.weekIndex - 1) }, "前の週"),
+      el("button", { type: "button", class: "btn-small week-flip", dataset: { dir: "-1" }, disabled: S.weekIndex === 0, onclick: () => move(S.weekIndex - 1) }, "‹ 前の週"),
       weekSelect,
-      el("button", { type: "button", class: "btn-small", disabled: S.weekIndex >= weeks.length - 1, onclick: () => move(S.weekIndex + 1) }, "次の週"),
+      el("button", { type: "button", class: "btn-small week-flip", dataset: { dir: "1" }, disabled: S.weekIndex >= weeks.length - 1, onclick: () => move(S.weekIndex + 1) }, "次の週 ›"),
     );
 }
 
@@ -1334,7 +1335,8 @@ function cell(date, period, closed, available, byKey, summary) {
       {
         type: "button",
         class: "acell-del",
-        title: "この割り当てを削除",
+        title: "この割り当てを削除（授業をドラッグして画面下のゴミ箱に落としても消せます）",
+        "aria-label": "この割り当てを削除",
         onclick: (e) => {
           e.stopPropagation();
           change(snapshot(a), null, { message: "割り当てを削除しました" });
@@ -1542,11 +1544,21 @@ function onDragMove(e) {
     d.moved = true;
     d.ghost = el("div", { class: `drag-ghost tone-${toneOf(d.pair.subject)}` }, d.pair.teacher_name);
     document.body.append(d.ghost);
+    // 入っている授業をドラッグしているときは、画面の下に「ここに離すと削除」を出す
+    if (d.source) {
+      d.trash = el("div", { class: "drag-trash", "aria-hidden": "true" }, "🗑 ここに離すと削除");
+      document.body.append(d.trash);
+    }
     document.body.classList.add("dragging");
   }
   d.ghost.style.left = `${e.clientX + 12}px`;
   d.ghost.style.top = `${e.clientY + 12}px`;
-  const td = cellAt(e.clientX, e.clientY);
+  const under = document.elementFromPoint(e.clientX, e.clientY);
+  const overTrash = Boolean(d.trash && under?.closest?.(".drag-trash"));
+  d.trash?.classList.toggle("over", overTrash);
+  if (overTrash) d.ghost.dataset.reason = "離すと削除します";
+  watchWeekFlip(d, under?.closest?.(".week-flip:not([disabled])") ?? null);
+  const td = overTrash ? null : cellAt(e.clientX, e.clientY);
   if (td !== d.hover) {
     d.hover?.classList.remove("drop-ok", "drop-warn", "drop-no");
     d.hover = td;
@@ -1560,14 +1572,44 @@ function onDragMove(e) {
   // 表が動いて、狙った時限と違うコマへ落ちることを防ぐ。
 }
 
+const WEEK_FLIP_DELAY_MS = 500; // ドラッグ中に週のボタンの上で止めてから週が変わるまで
+const WEEK_FLIP_REPEAT_MS = 900; // 止めたままなら、続けて次の週へ
+
+/** ドラッグ中、「前の週」「次の週」の上で少し止めたら週を変える（ほかの週のコマへ移せるように） */
+function watchWeekFlip(d, button) {
+  const dir = button ? Number(button.dataset.dir) : 0;
+  if (dir === d.flipDir) return;
+  clearTimeout(d.flipTimer);
+  document.querySelectorAll(".week-flip.drag-over").forEach((b) => b.classList.remove("drag-over"));
+  d.flipDir = dir;
+  if (!dir) return;
+  button.classList.add("drag-over");
+  const flip = () => {
+    if (S.drag !== d || d.flipDir !== dir) return;
+    const last = weeksOf(S.term.dates).length - 1;
+    const next = Math.max(0, Math.min(S.weekIndex + dir, last));
+    if (next === S.weekIndex) return;
+    S.weekIndex = next;
+    d.hover = null;
+    draw({ force: true });
+    // 描き直したボタンにも印を付け直す
+    S.root?.querySelector(`.week-flip[data-dir="${dir}"]:not([disabled])`)?.classList.add("drag-over");
+    d.flipTimer = setTimeout(flip, WEEK_FLIP_REPEAT_MS);
+  };
+  d.flipTimer = setTimeout(flip, WEEK_FLIP_DELAY_MS);
+}
+
 function cancelDrag() {
   const d = S.drag;
   window.removeEventListener("pointermove", onDragMove);
   window.removeEventListener("pointerup", onDragEnd);
   window.removeEventListener("pointercancel", cancelDrag);
   if (d) {
+    clearTimeout(d.flipTimer);
+    document.querySelectorAll(".week-flip.drag-over").forEach((b) => b.classList.remove("drag-over"));
     d.hover?.classList.remove("drop-ok", "drop-warn", "drop-no");
     d.ghost?.remove();
+    d.trash?.remove();
   }
   document.body.classList.remove("dragging");
   S.drag = null;
@@ -1576,7 +1618,8 @@ function cancelDrag() {
 
 function onDragEnd(e) {
   const d = S.drag;
-  const td = d?.moved ? cellAt(e.clientX, e.clientY) : null;
+  const toTrash = Boolean(d?.moved && d.trash && document.elementFromPoint(e.clientX, e.clientY)?.closest?.(".drag-trash"));
+  const td = d?.moved && !toTrash ? cellAt(e.clientX, e.clientY) : null;
   const judged = td ? judgeDrop(td) : null;
   cancelDrag();
   if (!d?.moved) {
@@ -1592,6 +1635,11 @@ function onDragEnd(e) {
   setTimeout(() => {
     if (S.drag?.justDropped) S.drag = null;
   }, 300);
+  if (toTrash) {
+    if (S.root !== d.root) return;
+    change(snapshot(d.source), null, { message: "割り当てを削除しました（「元に戻す」で戻せます）" });
+    return;
+  }
   if (!td) return;
   if (!judged?.ok) {
     toast(`置けません：${judged?.reason ?? "不明"}`, true);
