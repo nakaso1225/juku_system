@@ -511,5 +511,28 @@ body.dragging .acell-del { visibility: hidden; }
 
 /* 週の切替（カレンダーのすぐ上）。ドラッグ中はボタンを大きくして、上で止めると週が変わることを示す */
 .assign-head .assign-navigation { padding: 4px 0 6px; }
-body.dragging .week-flip:not([disabled]) { outline: 2px dashed var(--primary); outline-offset: 1px; }
-.week-flip.drag-over { background: var(--primary); color: #fff; }
+/* 講師の並びの上に重ねて出すゴミ箱（同じ大きさ。並びは下に隠れるだけで、位置は動かない） */
+.drag-trash.on-palette {
+  bottom: auto; transform: none; border-radius: var(--radius); padding: 0;
+  display: flex; align-items: center; justify-content: center; font-size: 1rem;
+}
+.drag-trash.on-palette.over { transform: none; }
+
+/* 前の週・次の週：カレンダーの左右の端の縦長ボタン */
+.week-frame { display: flex; align-items: stretch; gap: 6px; }
+.week-frame > .assign-table { flex: 1; min-width: 0; }
+.week-flip {
+  flex: 0 0 34px; width: 34px; min-height: 0; padding: 8px 0; margin: 0; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 6px;
+  border: 1px solid var(--border); border-radius: var(--radius); background: var(--surface); color: var(--primary); font-weight: 700;
+}
+.week-flip:hover:not([disabled]) { background: var(--primary-weak); border-color: var(--primary); }
+.week-flip[disabled] { opacity: 0.35; cursor: default; }
+.week-flip-arrow { font-size: 1.4rem; line-height: 1; }
+.week-flip-text { writing-mode: vertical-rl; letter-spacing: 0.15em; font-size: 0.8rem; }
+body.dragging .week-flip:not([disabled]) { border: 2px dashed var(--primary); }
+.week-frame .week-flip.drag-over, .week-frame .week-flip.drag-over:hover { background: var(--primary); color: #fff; border-color: var(--primary); }
+@media (max-width: 480px) {
+  .week-frame { gap: 2px; }
+  .week-flip { flex-basis: 22px; width: 22px; }
+  .week-flip-text { font-size: 0.65rem; letter-spacing: 0; }
+}

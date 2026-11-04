@@ -1239,18 +1239,33 @@ function grid(b) {
 function weekNavigation() {
   const weeks = weeksOf(S.term.dates);
   S.weekIndex = Math.max(0, Math.min(S.weekIndex, weeks.length - 1));
-  const move = (index) => { S.closeOverlay?.(); S.weekIndex = index; draw(); };
   const weekSelect = el("select", {
-    "aria-label": "表示する週", onchange: (e) => move(Number(e.target.value)),
+    "aria-label": "表示する週", onchange: (e) => moveWeek(Number(e.target.value)),
   }, weeks.map((week, index) => {
     const days = week.filter(Boolean);
     return el("option", { value: index, selected: index === S.weekIndex }, `第${index + 1}週　${fmtDate(days[0], false)}〜${fmtDate(days.at(-1), false)}`);
   }));
-  return el("div", { class: "week-navigation", "aria-label": "週の切替" },
-      el("button", { type: "button", class: "btn-small week-flip", dataset: { dir: "-1" }, disabled: S.weekIndex === 0, onclick: () => move(S.weekIndex - 1) }, "‹ 前の週"),
-      weekSelect,
-      el("button", { type: "button", class: "btn-small week-flip", dataset: { dir: "1" }, disabled: S.weekIndex >= weeks.length - 1, onclick: () => move(S.weekIndex + 1) }, "次の週 ›"),
-    );
+  // 「前の週」「次の週」はカレンダーの左右の端（weekFlipButton）。ここは週を選ぶ欄だけ
+  return el("div", { class: "week-navigation", "aria-label": "週の切替" }, weekSelect);
+}
+
+function moveWeek(index) {
+  S.closeOverlay?.();
+  S.weekIndex = index;
+  draw();
+}
+
+/** カレンダーの左右の端の縦長のボタン。ドラッグ中もこの上で少し止めると週が変わる（watchWeekFlip） */
+function weekFlipButton(dir) {
+  const last = weeksOf(S.term.dates).length - 1;
+  const label = dir < 0 ? "‹ 前の週" : "次の週 ›";
+  const disabled = dir < 0 ? S.weekIndex === 0 : S.weekIndex >= last;
+  return el(
+    "button",
+    { type: "button", class: `week-flip week-flip-${dir < 0 ? "prev" : "next"}`, dataset: { dir: String(dir) }, disabled, "aria-label": label, title: label, onclick: () => moveWeek(S.weekIndex + dir) },
+    el("span", { class: "week-flip-arrow" }, dir < 0 ? "‹" : "›"),
+    el("span", { class: "week-flip-text" }, dir < 0 ? "前の週" : "次の週"),
+  );
 }
 
 function weeklyGrid(renderCell, className = "") {
@@ -1265,7 +1280,7 @@ function weeklyGrid(renderCell, className = "") {
         "div",
         { class: "cal-week" },
         el("div", { class: "cal-week-head" }, `${fmtDate(days[0], false)} 〜 ${fmtDate(days[days.length - 1], false)}`),
-        el(
+        el("div", { class: "week-frame" }, weekFlipButton(-1), el(
           "table",
           { class: "assign-table" },
           el(
@@ -1298,7 +1313,7 @@ function weeklyGrid(renderCell, className = "") {
               ),
             ),
           ),
-        ),
+        ), weekFlipButton(1)),
       );
     }),
   );
@@ -1547,6 +1562,13 @@ function onDragMove(e) {
     // 入っている授業をドラッグしているときは、画面の下に「ここに離すと削除」を出す
     if (d.source) {
       d.trash = el("div", { class: "drag-trash", "aria-hidden": "true" }, "🗑 ここに離すと削除");
+      // ドラッグ中は使わない講師の並び（カレンダーのすぐ上）をゴミ箱にする。カレンダーのコマを隠さず、移動も短い。
+      // 並びが画面の外にあるとき（スマホでスクロールしたときなど）だけ、画面の下に出す
+      const r = S.root?.querySelector(".palette-panel")?.getBoundingClientRect();
+      if (r && r.height > 0 && r.top >= 0 && r.bottom <= window.innerHeight) {
+        d.trash.classList.add("on-palette");
+        Object.assign(d.trash.style, { left: `${r.left}px`, top: `${r.top}px`, width: `${r.width}px`, height: `${r.height}px` });
+      }
       document.body.append(d.trash);
     }
     document.body.classList.add("dragging");
@@ -1557,8 +1579,14 @@ function onDragMove(e) {
   const overTrash = Boolean(d.trash && under?.closest?.(".drag-trash"));
   d.trash?.classList.toggle("over", overTrash);
   if (overTrash) d.ghost.dataset.reason = "離すと削除します";
-  watchWeekFlip(d, under?.closest?.(".week-flip:not([disabled])") ?? null);
-  const td = overTrash ? null : cellAt(e.clientX, e.clientY);
+  const flipButton = under?.closest?.(".week-flip:not([disabled])") ?? null;
+  watchWeekFlip(d, flipButton);
+  if (flipButton) {
+    d.hover?.classList.remove("drop-ok", "drop-warn", "drop-no");
+    d.hover = null;
+    d.ghost.dataset.reason = flipButton.dataset.dir === "1" ? "止めると次の週へ" : "止めると前の週へ";
+  }
+  const td = overTrash || flipButton ? null : cellAt(e.clientX, e.clientY);
   if (td !== d.hover) {
     d.hover?.classList.remove("drop-ok", "drop-warn", "drop-no");
     d.hover = td;
