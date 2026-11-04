@@ -114,71 +114,12 @@ function subjectsForm(subjects, { submitLabel, onSubmit, onCancel }) {
 // ------------------------------------------------------------ comiru の講師と紐付いていないとき
 
 function renderLinkForm() {
-  const nameInput = el("input", { type: "text", placeholder: "例：山田太郎", autocomplete: "name" });
-  const submit = el("button", { type: "submit", class: "btn-primary" }, "申請する");
-  show(
-    topbar(),
-    el(
-      "div",
-      { class: "card" },
-      el("h2", {}, "はじめての方へ"),
-      el(
-        "p",
-        {},
-        `このGoogleアカウント（${state.me.user.email}）は、comiru に登録されているメールアドレスと一致しませんでした。`,
-      ),
-      el(
-        "p",
-        { class: "muted" },
-        "comiru に登録しているアドレスの Google アカウントがあれば、いったんログアウトしてそちらでログインしてください。すぐに使えます。",
-      ),
-      el("p", { class: "muted" }, "このアカウントのまま使う場合は、名前を入れて申請してください。事務が確認すると使えるようになります（最初の1回だけです）。"),
-      el(
-        "form",
-        {
-          onsubmit: async (e) => {
-            e.preventDefault();
-            submit.disabled = true;
-            try {
-              await api("/api/teacher/link-request", { method: "POST", body: { name: nameInput.value } });
-              toast("✓ 申請しました");
-              await start();
-            } catch (err) {
-              toast(err.message, true);
-            } finally {
-              submit.disabled = false;
-            }
-          },
-        },
-        el("label", { class: "field" }, el("span", {}, "名前（comiru と同じ漢字で）"), nameInput),
-        submit,
-      ),
-    ),
-  );
-}
-
-function renderRequested(request) {
-  show(
-    topbar(),
-    el(
-      "div",
-      { class: "card" },
-      el("h2", {}, "事務の確認待ちです"),
-      el("p", {}, `「${request.requested_name}」として申請しました（${fmtDateTime(request.created_at)}）。`),
-      el("p", { class: "muted" }, "事務が確認すると、このページで予定を入力できるようになります。少し時間をおいて、もう一度開いてください。"),
-      el(
-        "button",
-        {
-          type: "button",
-          onclick: async () => {
-            await api("/api/teacher/link-request", { method: "DELETE" });
-            await start();
-          },
-        },
-        "申請を取り消して入れ直す",
-      ),
-    ),
-  );
+  show(topbar(), el("div", { class: "card" },
+    el("h2", {}, "ログイン用メールの登録が必要です"),
+    el("p", {}, state.me.user.email),
+    el("p", {}, "このメールを事務に伝えてください。登録されると、このGoogleアカウントで予定を入力できます。"),
+    el("button", { type: "button", onclick: start }, "登録を確認する"),
+  ));
 }
 
 // ------------------------------------------------------------ メイン画面
@@ -425,7 +366,7 @@ async function start() {
     return;
   }
   if (!state.me.teacher) {
-    return state.me.link_request ? renderRequested(state.me.link_request) : renderLinkForm();
+    return renderLinkForm();
   }
   await renderMain();
 }

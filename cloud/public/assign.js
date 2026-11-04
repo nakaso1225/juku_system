@@ -25,6 +25,10 @@ const SUBJECT_TONES = [
   [/社会|日本史|世界史|地理|倫政|公共/, "soc"],
 ];
 const toneOf = (subject) => SUBJECT_TONES.find(([re]) => re.test(subject))?.[1] ?? "other";
+const studentColors = (id) => {
+  const hue = (id * 47 + 160) % 360;
+  return `--student-bg:hsl(${hue} 72% 94%);--student-border:hsl(${hue} 62% 48%);--student-text:hsl(${hue} 45% 22%)`;
+};
 const slotKey = (date, period) => `${date}#${period}`;
 const seatKey = (x) => `${x.student_id}#${x.date}#${x.period}`; // 生徒×日時（1コマに1授業）
 
@@ -56,6 +60,9 @@ const S = {
   nextTempId: -1,
   view: null, // 確定データ＋保存待ちの操作を重ねた「画面に出す状態」（キャッシュ）
   studentId: null,
+  mode: "student",
+  teacherId: null,
+  weekIndex: 0,
   subject: null,
   conflictsOpen: false,
   modalOpen: false,
@@ -98,7 +105,7 @@ export function disposeAssignView() {
 
 export async function assignView(term, meta, { editStudent } = {}) {
   if (S.term?.id !== term.id) {
-    Object.assign(S, { studentId: null, subject: null, undo: [], redo: [], brush: null });
+    Object.assign(S, { studentId: null, teacherId: null, weekIndex: 0, subject: null, undo: [], redo: [], brush: null });
   }
   S.term = term;
   S.meta = meta;
@@ -273,12 +280,14 @@ function view() {
   }
   const bySlot = new Map();
   const byStudent = new Map();
+  const byTeacher = new Map();
   for (const a of bySeat.values()) {
     const k = slotKey(a.date, a.period);
     (bySlot.get(k) ?? bySlot.set(k, []).get(k)).push(a);
     (byStudent.get(a.student_id) ?? byStudent.set(a.student_id, []).get(a.student_id)).push(a);
+    if (a.teacher_id != null) (byTeacher.get(a.teacher_id) ?? byTeacher.set(a.teacher_id, []).get(a.teacher_id)).push(a);
   }
-  S.view = { bySeat, bySlot, byStudent };
+  S.view = { bySeat, bySlot, byStudent, byTeacher };
   return S.view;
 }
 
@@ -554,11 +563,17 @@ function failOp(op, err) {
 
 function undoOrRedo(kind) {
   const stack = kind === "undo" ? S.undo : S.redo;
-  const action = stack.pop();
+  const action = stack.at(-1);
   if (!action) return;
   const [from, to] = kind === "undo" ? [action.after, action.before] : [action.before, action.after];
-  // 画面の状態から、今その場所にある割り当てを「元」として扱う（ほかの人が直していても、その時点のものを置き換える）
+  // 自分の操作後に別の職員が直した授業は、Undoでも上書きしない。
   const current = from ? view().bySeat.get(seatKey(from)) : null;
+  const target = to ? view().bySeat.get(seatKey(to)) : null;
+  if ((from && (!current || JSON.stringify(snapshot(current)) !== JSON.stringify(snapshot(from)))) || (target && !sameSeat(from, to))) {
+    toast("この操作の後に授業が変更されています。最新の授業を確認してから修正してください", true);
+    return;
+  }
+  stack.pop();
   (kind === "undo" ? S.redo : S.undo).push(action);
   const ok = change(current ? snapshot(current) : null, to, { action, kind, message: kind === "undo" ? "元に戻しました" : "やり直しました" });
   if (!ok) (kind === "undo" ? S.redo : S.undo).pop();
@@ -621,14 +636,15 @@ function draw() {
   }
   S.needsDraw = false;
   const students = studentList();
-  if (!students.length) {
+  if (!students.length && S.mode === "student") {
     S.root.replaceChildren(
-      el("div", { class: "notice info" }, "まだ予定を入力した生徒がいません。「生徒」タブで生徒の予定を入力すると、ここで講師を割り当てられます。"),
+      viewSwitch(),
+      el("div", { class: "notice info" }, "まだ予定を入力した生徒がいません。「名簿・予定」の「生徒」で予定を入力してください。"),
     );
     return;
   }
   if (!students.some((s) => s.id === S.studentId)) {
-    S.studentId = students[0].id;
+    S.studentId = students[0]?.id ?? null;
     fixSubject();
   }
   const b = board();
@@ -638,14 +654,34 @@ function draw() {
   const markKey = mark?.dataset.key;
   const markTop = mark?.getBoundingClientRect().top;
   const y = window.scrollY;
-  S.root.replaceChildren(el("div", { class: "assign-head" }, toolbar(b, students), palette(b), conflictBar()), ...[grid(b)].filter(Boolean));
+  S.root.replaceChildren(
+    el("div", { class: "assign-head" },
+      el("div", { class: "assign-navigation" }, viewSwitch(), weekNavigation()),
+      S.mode === "teacher" ? teacherToolbar() : toolbar(b, students), S.mode === "student" ? palette(b) : null, conflictBar()),
+    ...[S.mode === "teacher" ? teacherGrid() : grid(b)].filter(Boolean),
+  );
   window.scrollTo(0, y);
   const after = markKey && S.root.querySelector(`td[data-key="${markKey}"]`);
   if (after) window.scrollBy(0, after.getBoundingClientRect().top - markTop);
 }
 
+function viewSwitch() {
+  return el("div", { class: "assign-view-switch", role: "group", "aria-label": "時間割の表示" },
+    [["student", "生徒から見る"], ["teacher", "講師から見る"]].map(([mode, label]) => el("button", {
+      type: "button", class: `btn-small${S.mode === mode ? " selected" : ""}`, "aria-pressed": String(S.mode === mode),
+      onclick: () => {
+        S.closeOverlay?.();
+        S.mode = mode;
+        S.brush = null;
+        draw();
+      },
+    }, label)),
+  );
+}
+
 function selectStudent(id) {
   S.studentId = id;
+  S.mode = "student";
   S.brush = null;
   fixSubject();
   draw();
@@ -727,7 +763,7 @@ function toolbar(b, students) {
     ["調整中", "完了"].map((s) => el("option", { value: s, selected: st?.status === s }, s)),
   );
 
-  const counts = Object.entries(b?.subject_counts ?? {});
+  const counts = (st?.subjects ?? []).map((subject) => [subject, b?.subject_counts[subject] ?? 0]);
 
   return el(
     "div",
@@ -746,19 +782,14 @@ function toolbar(b, students) {
         el("strong", {}, "状態"),
         st?.has_error ? el("span", { class: "badge danger" }, "要調整") : statusSelect,
       ),
-      el(
-        "div",
-        { class: "row" },
-        el("button", { type: "button", class: "btn-small", disabled: !S.undo.length, title: "Ctrl+Z", onclick: () => undoOrRedo("undo") }, "↶ 元に戻す"),
-        el("button", { type: "button", class: "btn-small", disabled: !S.redo.length, title: "Ctrl+Y", onclick: () => undoOrRedo("redo") }, "↷ やり直す"),
-      ),
+      historyActions(),
     ),
     el(
       "div",
-      { class: "row", style: "margin-top:8px;justify-content:space-between" },
+      { class: "assignment-summary" },
       el(
         "div",
-        { class: "row", style: "gap:6px" },
+        { class: "assigned-counts" },
         el("span", { class: "muted" }, "割り当て済み："),
         counts.length
           ? counts.map(([subject, n]) => el("span", { class: `count-chip tone-${toneOf(subject)}` }, `${subject} ${n}コマ`))
@@ -769,6 +800,170 @@ function toolbar(b, students) {
     el("div", { class: "assignment-save-status", role: "status", "aria-live": "polite" }, saveStatusText()),
     st?.note ? el("div", { class: "notice info", style: "margin:8px 0 0" }, `備考：${st.note}`) : null,
   );
+}
+
+function historyActions() {
+  return el("div", { class: "row" },
+    el("button", { type: "button", class: "btn-small", disabled: !S.undo.length, title: "Ctrl+Z", onclick: () => undoOrRedo("undo") }, "↶ 元に戻す"),
+    el("button", { type: "button", class: "btn-small", disabled: !S.redo.length, title: "Ctrl+Y", onclick: () => undoOrRedo("redo") }, "↷ やり直す"),
+  );
+}
+
+// ------------------------------------------------------------ 講師から見る（同じ保存キューと手元のデータを使う）
+
+function calendarTeachers() {
+  return [...S.teachers.values()].filter((t) => t.active !== false || view().byTeacher.has(t.id)).sort(compareNames);
+}
+
+function teacherToolbar() {
+  const teachers = calendarTeachers();
+  if (!teachers.some((t) => t.id === S.teacherId)) S.teacherId = teachers[0]?.id ?? null;
+  const t = S.teachers.get(S.teacherId);
+  const count = (view().byTeacher.get(S.teacherId) ?? []).length;
+  return el("div", { class: "card assign-toolbar teacher-toolbar" },
+    el("div", { class: "row", style: "justify-content:space-between" },
+      el("div", { class: "row" },
+        el("label", { for: "calendar-teacher" }, "講師"),
+        el("select", { id: "calendar-teacher", style: "width:auto;max-width:100%", onchange: (e) => { S.teacherId = Number(e.target.value); draw(); } },
+          teachers.map((x) => el("option", { value: x.id, selected: x.id === S.teacherId }, `${x.name}${x.active === false ? "（名簿対象外）" : ""}`))),
+        t ? el("span", { class: "muted" }, `${[...t.subjects].join("・")} ／ ${count}コマ`) : null,
+      ), historyActions(),
+    ),
+    el("div", { class: "row teacher-calendar-help" },
+      el("span", { class: "muted" }, "空きコマから生徒を選んで配置できます。授業を押すと詳細が開きます。"),
+      comiruActions(),
+    ),
+    el("div", { class: "assignment-save-status", role: "status", "aria-live": "polite" }, saveStatusText()),
+  );
+}
+
+function teacherGrid() {
+  const t = S.teachers.get(S.teacherId);
+  if (!t) return el("div", { class: "notice info" }, "まだ予定を提出した講師がいません。「名簿・予定」で提出状況を確認してください。");
+  return weeklyGrid((date, period) => {
+    if (!date) return el("td", { class: "acell out" });
+    const key = slotKey(date, period);
+    const assignments = (view().bySlot.get(key) ?? []).filter((a) => a.teacher_id === t.id);
+    const closed = S.term.closed_dates.includes(date);
+    const td = el("td", { class: "acell teacher-cell", dataset: { key, date, period } });
+    if (assignments.length) {
+      td.classList.add("assigned");
+      if (assignments.some((a) => a.pending)) td.classList.add("pending");
+      if (assignments.some((a) => flagsOf(a).has_conflict)) td.classList.add("conflict");
+      for (const a of assignments) td.append(el("button", {
+        type: "button", class: "teacher-lesson", style: studentColors(a.student_id), onclick: (e) => openTeacherLesson(a, e.currentTarget),
+        "aria-label": `${studentName(a.student_id)} ${a.subject} 席${a.table_id}${a.pending ? " 保存中" : ""}`,
+      }, el("span", {}, studentName(a.student_id)), el("small", {}, `${a.subject}・席${a.table_id}${a.pending ? "・保存中" : ""}`)));
+    } else if (closed) {
+      td.classList.add("closed");
+      if (period === S.term.periods[0]) td.append("休");
+    } else if (!t.slots.has(key) || t.active === false) {
+      td.classList.add("unavailable");
+    } else {
+      const full = !guessTable(date, period, -1);
+      td.classList.add("open", ...(full ? ["full"] : ["has-teacher"]));
+      td.append(el("button", {
+        type: "button", class: "teacher-open-slot", disabled: full,
+        "aria-label": `${fmtDate(date)} ${period}限 ${full ? "満席" : "空き・生徒を選ぶ"}`,
+        onclick: (e) => openStudentPicker(t.id, date, period, e.currentTarget),
+      }, full ? "満席" : "空き"));
+    }
+    return td;
+  }, "teacher-grid");
+}
+
+function eligibleStudents(teacherId, date, period) {
+  const key = slotKey(date, period), t = S.teachers.get(teacherId), v = view();
+  if (!t || t.active === false || !t.slots.has(key) || !slotInTerm(date, period)) return [];
+  if ((v.bySlot.get(key) ?? []).some((a) => a.teacher_id === teacherId)) return [];
+  return [...S.students.values()].filter((s) => s.entered && s.slots.has(key) && !v.bySeat.has(seatKey({ student_id: s.id, date, period })))
+    .sort(compareStudents).map((s) => ({ student: s, subjects: s.subjects.filter((subject) => t.subjects.has(subject)) })).filter((x) => x.subjects.length);
+}
+
+/** 新しい補助欄はクリック・キーボードどちらでも操作し、閉じたら元のコマへ戻す。 */
+function assignmentPopover(title, anchor, content) {
+  if (S.modalOpen) return;
+  S.modalOpen = true;
+  const close = () => {
+    layer.remove();
+    document.removeEventListener("keydown", onKey, true);
+    S.modalOpen = false;
+    S.closeOverlay = null;
+    if (anchor?.isConnected) anchor.focus();
+  };
+  const onKey = (e) => {
+    if (e.key === "Escape") { e.preventDefault(); e.stopPropagation(); close(); }
+    if (e.key === "Tab") {
+      const controls = [...pop.querySelectorAll("button:not(:disabled), input, select")];
+      const first = controls[0], last = controls.at(-1);
+      if (e.shiftKey && document.activeElement === first) { e.preventDefault(); last?.focus(); }
+      else if (!e.shiftKey && document.activeElement === last) { e.preventDefault(); first?.focus(); }
+    }
+  };
+  const pop = el("div", { class: "popover", role: "dialog", "aria-label": title, "aria-modal": "true" },
+    el("div", { class: "modal-head" }, el("strong", {}, title), el("button", { type: "button", class: "btn-small", onclick: close }, "閉じる")),
+    content(close),
+  );
+  const layer = el("div", { class: "popover-layer", onclick: (e) => e.target === layer && close() }, pop);
+  document.body.append(layer);
+  S.closeOverlay = close;
+  document.addEventListener("keydown", onKey, true);
+  const r = anchor.getBoundingClientRect();
+  const left = r.right + 8 + pop.offsetWidth <= innerWidth - 8 ? r.right + 8 : r.left - pop.offsetWidth - 8;
+  Object.assign(pop.style, {
+    left: `${Math.max(8, Math.min(left, innerWidth - pop.offsetWidth - 8))}px`,
+    top: `${Math.max(8, Math.min(r.top, innerHeight - pop.offsetHeight - 8))}px`,
+  });
+  (pop.querySelector("input") ?? pop.querySelector("button"))?.focus();
+}
+
+function openStudentPicker(teacherId, date, period, anchor) {
+  assignmentPopover(`${fmtDate(date)} ${period}限・${teacherName(teacherId)}`, anchor, (close) => {
+    const search = el("input", { type: "text", placeholder: "名前・ふりがなで検索", "aria-label": "配置する生徒を検索", autocomplete: "off" });
+    const list = el("div", { class: "student-candidates", "aria-live": "polite" });
+    const choose = (student, subject) => {
+      // 欄を開いた後に受け取った変更も確認し、古い候補のまま上書きしない。
+      if (!eligibleStudents(teacherId, date, period).some((x) => x.student.id === student.id && x.subjects.includes(subject))) {
+        toast("予定が変わりました。配置できる生徒を選び直してください", true);
+        refresh();
+        return;
+      }
+      close();
+      change(null, { student_id: student.id, teacher_id: teacherId, subject, date, period, table_id: "auto" }, {
+        strict: true, onlyIfEmpty: true, message: `${student.name} を割り当てました`,
+      });
+    };
+    const refresh = () => {
+      const q = search.value.normalize("NFKC").replace(/\s+/g, "");
+      const rows = eligibleStudents(teacherId, date, period).filter(({ student: s }) => !q || nameKey(s).includes(q) || s.name.normalize("NFKC").replace(/\s+/g, "").includes(q));
+      list.replaceChildren(...(rows.length ? rows.map(({ student: s, subjects }) => el("div", { class: "student-candidate" },
+        el("div", {}, s.name, s.grade ? el("span", { class: "muted" }, `（${s.grade}）`) : null),
+        el("div", { class: "row" }, subjects.map((subject) => el("button", { type: "button", class: "btn-small", "aria-label": `${s.name}・${subject}を配置`, onclick: () => choose(s, subject) }, subject))),
+      )) : [el("p", { class: "muted" }, "通塾予定と科目が合い、授業がまだ入っていない生徒はいません。") ]));
+    };
+    search.addEventListener("input", refresh);
+    refresh();
+    return el("div", {}, el("p", { class: "muted" }, "配置する生徒と科目を選んでください。席は自動で選びます。"), search, list);
+  });
+}
+
+function openTeacherLesson(assignment, anchor) {
+  const a = assignment;
+  assignmentPopover(`${fmtDate(a.date)} ${a.period}限`, anchor, (close) => el("div", {},
+    el("p", {}, `${studentName(a.student_id)}・${a.subject}`),
+    el("p", { class: "muted" }, `${teacherName(a.teacher_id)}・席${a.table_id}${a.pending ? "（確認・保存中）" : ""}`),
+    flagsOf(a).has_conflict ? el("p", { class: "warn-text" }, "予定の不一致または重複があります。生徒の時間割で確認してください。") : null,
+    el("div", { class: "row" },
+      el("button", { type: "button", class: "btn-small", onclick: () => { close(); selectStudent(a.student_id); } }, "この生徒の時間割を開く"),
+      el("button", { type: "button", class: "btn-small btn-danger", disabled: a.pending, onclick: () => {
+        const current = view().bySeat.get(seatKey(a));
+        if (!current || current.pending || current.id !== a.id || JSON.stringify(snapshot(current)) !== JSON.stringify(snapshot(a))) {
+          close(); toast("授業が変更されています。最新の授業を確認してください", true); draw(); return;
+        }
+        close(); change(snapshot(a), null, { message: "割り当てを削除しました" });
+      } }, "この割り当てを削除"),
+    ),
+  ));
 }
 
 // ------------------------------------------------------------ コピペ用（comiru 連携が止まったとき、元の GAS のシートに貼って登録する逃げ道）
@@ -821,32 +1016,25 @@ async function copySheetRows(studentId) {
   }
 }
 
-/** comiru への反映ボタン（未反映の件数つき） */
+/** comiru への反映は、対象を選ぶ確認画面にまとめる。 */
 function comiruActions() {
   const comiru = S.comiruStatus;
-  const myPending = comiru?.students?.[S.studentId]?.pending ?? 0;
-  if (!comiru?.configured) {
-    return el("span", { class: "muted comiru-actions" }, comiru ? "comiru 連携が未設定です" : "comiru の反映状況を確認中…");
-  }
   return el(
     "div",
     { class: "row comiru-actions" },
-    el(
+    comiru?.configured ? el(
       "button",
-      { type: "button", class: "btn-small", onclick: () => openComiruDialog(S.studentId) },
-      `この生徒を comiru に反映${myPending ? `（${myPending}件）` : ""}`,
-    ),
-    el(
-      "button",
-      { type: "button", class: `btn-small${comiru.pending_total ? " btn-primary" : ""}`, onclick: () => openComiruDialog(null) },
-      `全体を comiru に反映${comiru.pending_total ? `（${comiru.pending_total}件）` : ""}`,
-    ),
+      { type: "button", class: "btn-small btn-primary", onclick: () => openComiruDialog(S.mode === "student" ? S.studentId : null) },
+      "comiru反映を確認",
+    ) : el("span", { class: "muted" }, comiru ? "comiru 連携が未設定です" : "comiru の反映状況を確認中…"),
     el(
       "details",
       { class: "copy-menu" },
       el("summary", { class: "btn-small", title: "comiru 連携が止まったときに、元の GAS のシートへ貼って登録する" }, "コピペ用"),
-      el("button", { type: "button", class: "btn-small", onclick: () => copySheetRows(S.studentId) }, "この生徒をコピー"),
-      el("button", { type: "button", class: "btn-small", onclick: () => copySheetRows(null) }, "全員分をコピー"),
+      el("div", { class: "copy-menu-items" },
+        S.mode === "student" ? el("button", { type: "button", class: "btn-small", onclick: () => copySheetRows(S.studentId) }, "この生徒をコピー") : null,
+        el("button", { type: "button", class: "btn-small", onclick: () => copySheetRows(null) }, "全員分をコピー"),
+      ),
     ),
   );
 }
@@ -890,7 +1078,7 @@ async function editCurrentStudent() {
 
 function conflictBar() {
   const list = conflicts();
-  if (!list.length) return el("div", { class: "conflict-line ok" }, "✓ 重複・不一致はありません");
+  if (!list.length) return el("div", { class: "conflict-line ok" }, "要確認 0件");
   const grouped = new Map();
   for (const c of list) {
     const k = `${c.date}#${c.period}#${[...c.students].sort().join("|")}`;
@@ -916,6 +1104,7 @@ function conflictBar() {
                 const s = [...S.students.values()].find((x) => x.name === name);
                 if (!s) return toast(`${name} は予定が入力されていません`, true);
                 S.conflictsOpen = false;
+                S.weekIndex = Math.max(0, weeksOf(S.term.dates).findIndex((week) => week.includes(c.date)));
                 selectStudent(s.id);
                 document.querySelector(`[data-key="${slotKey(c.date, c.period)}"]`)?.scrollIntoView({ block: "center", behavior: "smooth" });
               },
@@ -940,7 +1129,7 @@ function conflictBar() {
           pop.classList.toggle("hidden", !S.conflictsOpen);
         },
       },
-      `⚠ 重複・不一致が ${grouped.size}件あります（押すと一覧）`,
+      `要確認 ${grouped.size}件・詳細`,
     ),
     pop,
   );
@@ -978,7 +1167,7 @@ function palette(b) {
       "div",
       { class: "palette-heading" },
       S.brush
-        ? el("span", { class: "brush-note" }, `🖌 ${S.brush.teacher_name}（${S.brush.subject}）で連続入力中`)
+        ? el("span", { class: "brush-note" }, `${S.brush.teacher_name}（${S.brush.subject}）で連続入力中`)
         : el("span", { class: "muted" }, chips.length ? "講師を押すと連続入力／ドラッグで配置" : "コマを押して講師を選んでください"),
       S.brush ? el("button", { type: "button", class: "btn-small", onclick: () => setBrush(null) }, "連続入力を終了（Esc）") : null,
     ),
@@ -1043,11 +1232,33 @@ function grid(b) {
     return el("div", { class: "notice warn" }, "この生徒の受講できるコマがまだ入力されていません（生徒タブで入力）。");
   }
   const summary = S.brush ? new Map() : slotSummary(S.studentId, S.subject);
+  return weeklyGrid((date, period) => cell(date, period, closed, available, byKey, summary));
+}
 
+function weekNavigation() {
+  const weeks = weeksOf(S.term.dates);
+  S.weekIndex = Math.max(0, Math.min(S.weekIndex, weeks.length - 1));
+  const move = (index) => { S.closeOverlay?.(); S.weekIndex = index; draw(); };
+  const weekSelect = el("select", {
+    "aria-label": "表示する週", onchange: (e) => move(Number(e.target.value)),
+  }, weeks.map((week, index) => {
+    const days = week.filter(Boolean);
+    return el("option", { value: index, selected: index === S.weekIndex }, `第${index + 1}週　${fmtDate(days[0], false)}〜${fmtDate(days.at(-1), false)}`);
+  }));
+  return el("div", { class: "week-navigation", "aria-label": "週の切替" },
+      el("button", { type: "button", class: "btn-small", disabled: S.weekIndex === 0, onclick: () => move(S.weekIndex - 1) }, "前の週"),
+      weekSelect,
+      el("button", { type: "button", class: "btn-small", disabled: S.weekIndex >= weeks.length - 1, onclick: () => move(S.weekIndex + 1) }, "次の週"),
+    );
+}
+
+function weeklyGrid(renderCell, className = "") {
+  const term = S.term;
+  const weeks = weeksOf(term.dates);
   return el(
     "div",
-    { class: "assign-grid" },
-    weeksOf(term.dates).map((week) => {
+    { class: `assign-grid ${className}`.trim() },
+    weeks.slice(S.weekIndex, S.weekIndex + 1).map((week) => {
       const days = week.filter(Boolean);
       return el(
         "div",
@@ -1082,7 +1293,7 @@ function grid(b) {
                 "tr",
                 {},
                 el("th", { class: "cal-period" }, el("span", {}, `${period}限`), el("small", {}, term.period_times?.[period]?.start ?? "")),
-                week.map((date) => cell(date, period, closed, available, byKey, summary)),
+                week.map((date) => renderCell(date, period)),
               ),
             ),
           ),
@@ -1114,7 +1325,7 @@ function cell(date, period, closed, available, byKey, summary) {
     const pill = el(
       "div",
       { class: `pill tone-${toneOf(a.subject)}` },
-      el("span", { class: "pill-name" }, a.teacher_name),
+      el("span", { class: "pill-name" }, a.teacher_name, el("small", { class: "pill-subject" }, a.subject)),
       el("span", { class: "pill-table" }, a.table_id),
     );
     pill.addEventListener("pointerdown", (e) => startDrag(e, { teacher_id: a.teacher_id, teacher_name: a.teacher_name, subject: a.subject }, a));
@@ -1131,7 +1342,9 @@ function cell(date, period, closed, available, byKey, summary) {
       },
       "×",
     );
-    td.append(pill, del, reasons.length ? el("div", { class: "acell-reason" }, reasons.join("・")) : "");
+    td.append(pill, del);
+    if (a.pending) td.append(el("div", { class: "pending-label" }, "確認・保存中"));
+    if (reasons.length) td.append(el("div", { class: "acell-reason", title: reasons.join("・") }, reasons.join("・")));
     const bs = brushState(key, a);
     if (bs) td.classList.add(bs);
     // 講師名の部分はドラッグ用（ドラッグせずに離したときは onDragEnd が講師選択を開く）
@@ -1181,12 +1394,14 @@ function openTeacherModal(date, period, existing, anchor) {
   const studentId = S.studentId;
   const teachers = candidates(date, period, subject, studentId);
   S.modalOpen = true;
-  const defaultTable = existing?.table_id ?? "auto";
+  const defaultTable = existing?.table_id ?? guessTable(date, period, studentId);
+  let manualTable = false;
+  const used = new Set((view().bySlot.get(slotKey(date, period)) ?? []).filter((a) => a.student_id !== studentId).map((a) => a.table_id));
   const tableSelect = el(
     "select",
-    { style: "width:auto;padding:4px 8px" },
-    el("option", { value: "auto", selected: defaultTable === "auto" }, "空いている席を自動選択"),
-    S.meta.table_ids.map((t) => el("option", { value: t, selected: t === defaultTable }, t)),
+    { "aria-label": "席", style: "width:auto;padding:4px 8px", onchange: () => { manualTable = true; } },
+    defaultTable == null ? el("option", { value: "", selected: true }, "満席") : null,
+    S.meta.table_ids.map((t) => el("option", { value: t, selected: t === defaultTable, disabled: used.has(t) }, t)),
   );
 
   const close = () => {
@@ -1197,9 +1412,10 @@ function openTeacherModal(date, period, existing, anchor) {
     anchor?.classList.remove("selecting");
   };
   const choose = (teacher, keepBrush = false) => {
+    if (!tableSelect.value) return toast("空いている席がありません", true);
     close();
     if (keepBrush) S.brush = { teacher_id: teacher.teacher_id, teacher_name: teacher.name, subject };
-    const after = { student_id: studentId, teacher_id: teacher.teacher_id, table_id: tableSelect.value, subject, date, period: Number(period) };
+    const after = { student_id: studentId, teacher_id: teacher.teacher_id, table_id: manualTable || existing ? tableSelect.value : "auto", subject, date, period: Number(period) };
     change(snapshot(existing), after, { strict: true, message: `${teacher.name} を割り当てました${teacher.has_conflict ? "（講師重複あり）" : ""}` });
   };
   const onKey = (e) => {
@@ -1244,7 +1460,7 @@ function openTeacherModal(date, period, existing, anchor) {
               el(
                 "button",
                 { type: "button", class: "btn-small brush-btn", title: "この講師で、ほかのコマも続けて入れる", onclick: () => choose(t, true) },
-                "🖌続けて",
+                "続けて配置",
               ),
             ),
           ),
@@ -1340,10 +1556,8 @@ function onDragMove(e) {
       d.ghost.dataset.reason = j.reason;
     }
   }
-  // 画面の端に来たら自動でスクロール（週をまたいで動かせるように）
-  const edge = 60;
-  if (e.clientY < edge) window.scrollBy(0, -12);
-  else if (e.clientY > window.innerHeight - edge) window.scrollBy(0, 12);
+  // ポインタの位置だけではスクロールしない。横へドラッグした際に
+  // 表が動いて、狙った時限と違うコマへ落ちることを防ぐ。
 }
 
 function cancelDrag() {
@@ -1409,6 +1623,18 @@ async function openComiruDialog(studentId) {
     scheduleComiruStatus(0);
   };
   const name = studentId ? studentName(studentId) : null;
+  const scopeSelect = el("select", {
+    "aria-label": "comiruに反映する対象", style: "width:auto;max-width:100%",
+    onchange: () => {
+      if (S.comiruRunning) return;
+      const next = scopeSelect.value === "all" ? null : Number(scopeSelect.value);
+      close();
+      openComiruDialog(next);
+    },
+  },
+    S.studentId ? el("option", { value: S.studentId, selected: studentId != null }, `${studentName(S.studentId)}さん` ) : null,
+    el("option", { value: "all", selected: studentId == null }, "全生徒"),
+  );
   const backdrop = el(
     "div",
     { class: "modal-backdrop" },
@@ -1418,9 +1644,10 @@ async function openComiruDialog(studentId) {
       el(
         "div",
         { class: "modal-head" },
-        el("h2", { style: "margin:0" }, name ? `${name} を comiru に反映` : "全体を comiru に反映"),
+        el("h2", { style: "margin:0" }, "comiruへの反映内容"),
         el("button", { type: "button", onclick: close }, "閉じる"),
       ),
+      el("div", { class: "row", style: "margin-bottom:12px" }, el("span", {}, "対象"), scopeSelect),
       body,
     ),
   );
@@ -1478,6 +1705,7 @@ async function openComiruDialog(studentId) {
     if (S.comiruRunning || closed) return;
     if (!confirm(`${runnable.length}件を comiru に反映します。よろしいですか？`)) return;
     runButton.disabled = true;
+    scopeSelect.disabled = true;
     S.comiruRunning = true;
     let done = 0;
     let failed = 0;
@@ -1518,7 +1746,7 @@ async function openComiruDialog(studentId) {
     el(
       "p",
       { class: "muted" },
-      "アプリの割り当てに合わせて、アプリが登録した授業だけを追加・変更・削除します。comiru で消されたり変えられたりしていた授業も、アプリの内容に戻します。comiru に直接入れた授業（レギュラーなど）には触りません。",
+      `${name ? `${name}さん` : "全生徒"}が対象です。アプリが登録した授業を、下の一覧のとおり追加・変更・削除します。comiruで変更された授業もアプリの内容に戻します。直接登録された通常授業は対象外です。`,
     ),
     ...groups.map(([op, list]) => el("div", { style: "margin-bottom:12px" }, el("h3", {}, `${label[op]}（${list.length}件）`), el("ul", { class: "change-list comiru-plan" }, list.map(line)))),
     el("div", { class: "row" }, runButton, progress),

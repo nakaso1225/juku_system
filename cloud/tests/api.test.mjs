@@ -110,6 +110,58 @@ after(async () => {
   if (work) await rm(work, { recursive: true, force: true });
 });
 
+test('講師のログイン用メールを登録すると承認なしで利用でき、変更前のアカウントは使えない', async () => {
+  const before = await api('/admin/terms/1/teachers/1');
+  await api('/admin/teachers/1/login-email', { method:'PUT', body:{email:'sato@example.invalid'}, status:409 });
+  await api('/admin/teachers/1/login-email', { method:'PUT', body:{email:'invalid'}, status:400 });
+  try {
+    await api('/admin/teachers/1/login-email', { method:'PUT', body:{email:'new-teacher@example.invalid'} });
+    assert.equal((await api('/teacher/profile')).teacher, null);
+    await api('/teacher/terms/1', { status:403 });
+    const login = await fetch(origin + '/auth/dev-login?email=new-teacher%40example.invalid', {redirect:'manual'});
+    const otherCookie = login.headers.get('set-cookie').split(';')[0];
+    const response = await fetch(origin + '/api/teacher/profile', {headers:{Cookie:otherCookie}});
+    assert.equal(response.status,200);
+    assert.equal((await response.json()).teacher.id,1);
+    await api('/admin/comiru/refresh?which=teachers', {method:'POST'});
+    const teacher = (await api('/admin/teachers?term_id=1')).find(t=>t.id===1);
+    assert.equal(teacher.login_email_override,'new-teacher@example.invalid');
+    assert.deepEqual((await api('/admin/terms/1/teachers/1')).slots,before.slots);
+    // 既に発行済みのCookieでも、アドレスを変更した後は講師として利用できない。
+    await api('/admin/teachers/1/login-email', {method:'PUT',body:{email:'api-test@example.invalid'}});
+    const oldResponse = await fetch(origin + '/api/teacher/profile', {headers:{Cookie:otherCookie}});
+    assert.equal((await oldResponse.json()).teacher,null);
+    assert.equal((await api('/teacher/profile')).teacher.id,1);
+  } finally {
+    await api('/admin/teachers/1/login-email', {method:'PUT',body:{email:'api-test@example.invalid'}});
+  }
+});
+
+test('講習は確認後だけ削除でき、競合を防ぎ、予定を失わず復元できる', async () => {
+  const created = await api('/admin/terms',{method:'POST',body:{name:'削除確認用',start_date:'2027-02-01',end_date:'2027-02-07',periods:[2],closed_dates:[],accepting:true},status:201});
+  const path='/admin/terms/'+created.id;
+  await api(path,{method:'DELETE',body:{},status:400});
+  let preview=await api(path+'/delete-preview');
+  await api(path,{method:'PUT',body:{...created,name:'削除確認用・変更後'}});
+  await api(path,{method:'DELETE',body:{confirmed:true,expected_version:preview.version},status:409});
+  // 保存済みの割り当てと講師予定を残すことも、元の講習で確認する。
+  const original=(await api('/admin/terms')).find(t=>t.id===1);
+  const before=await api(base+'/assign/snapshot');
+  preview=await api(base+'/delete-preview');
+  await api(base,{method:'DELETE',body:{confirmed:true,expected_version:preview.version}});
+  assert.equal((await api('/admin/terms')).some(t=>t.id===1),false);
+  assert.equal((await api('/teacher/terms')).some(t=>t.id===1),false);
+  await api(base+'/assign/snapshot',{status:404});
+  assert.equal((await api('/admin/terms?deleted=1')).some(t=>t.id===1),true);
+  const restored=await api(base+'/restore',{method:'POST'});
+  assert.equal(restored.accepting,false);
+  assert.deepEqual((await api(base+'/assign/snapshot')).assignments,before.assignments);
+  assert.deepEqual((await api(base+'/assign/snapshot')).teacher_slots,before.teacher_slots);
+  await api(base,{method:'PUT',body:original});
+  preview=await api(path+'/delete-preview');
+  await api(path,{method:'DELETE',body:{confirmed:true,expected_version:preview.version}});
+});
+
 test('名簿の読み仮名・学年を取り込み、一覧と候補を指定順に並べる', async () => {
   const teacherList = await api('/admin/teachers?term_id=1');
   assert.deepEqual(teacherList.map(t => t.id), [3,2,1]);

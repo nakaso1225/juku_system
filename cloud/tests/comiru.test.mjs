@@ -326,3 +326,17 @@ test('comiru で消された授業は、もう一度登録する', async () => {
   assert.equal((await apply([item.key]))[0].ok, true);
   assert.ok(comiru.seats.some((s) => s.date === '2026-12-27'));
 });
+
+test('講習を削除・復元してもcomiruへの登録記録を失わず、外部の授業を削除しない',async()=>{
+  const beforePlan=await plan(2);
+  const beforeSeats=JSON.stringify(comiru.seats);
+  const preview=await api(base+'/delete-preview');
+  assert.ok(preview.comiru>0);
+  comiru.calls=[];
+  await api(base,{method:'DELETE',body:{confirmed:true,expected_version:preview.version}});
+  assert.equal(JSON.stringify(comiru.seats),beforeSeats);
+  assert.deepEqual(comiru.calls,[]);
+  await api(base+'/restore',{method:'POST'});
+  assert.deepEqual(await plan(2),beforePlan);
+  assert.deepEqual(comiru.calls,[]);
+});

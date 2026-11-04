@@ -2,8 +2,8 @@
 //
 // 講師は comiru の名簿（teachers）に最初から全員いる。Google でログインすると
 //   1. その Google アカウントがすでに紐付いていれば、その講師
-//   2. comiru に登録されたメールアドレスと一致すれば、その場で自動的に紐付ける
-//   3. 一致しなければ、本人が名前を入れて「本人です」と申請し、事務が承認すると紐付く（初回だけ）
+//   2. 事務が登録したログイン用メール（未設定時はcomiruのメール）と一致すれば自動的に紐付ける
+// 旧画面からの申請APIは互換用に残す。通常は事務のメール設定だけで利用できる。
 import { Hono } from "hono";
 import { bumpVersion, resetCompletedWithErrors } from "./assignments";
 import { replaceSlotsStatements, TEACHER_SLOTS } from "./availability";
@@ -27,15 +27,16 @@ export interface LinkRequestRow {
 export async function resolveTeacher(env: Env, user: SessionUser): Promise<TeacherRow | null> {
   const db = env.DB;
   const linked = await db
-    .prepare("SELECT id, name, google_email, active FROM teachers WHERE google_sub = ?")
+    .prepare("SELECT id, name, google_email, active, login_email_override FROM teachers WHERE google_sub = ?")
     .bind(user.sub)
-    .first<TeacherRow & { active: number }>();
+    .first<TeacherRow & { active: number; login_email_override: string | null }>();
   // 紐付け済みでも、comiru の講師名簿から外れた講師（active = 0）は使えない（一覧から「隠す」とは別）
-  if (linked) return linked.active ? { id: linked.id, name: linked.name, google_email: linked.google_email } : null;
+  if (linked) return linked.active && (linked.login_email_override == null || linked.login_email_override === user.email.toLowerCase())
+    ? { id: linked.id, name: linked.name, google_email: linked.google_email } : null;
 
   await ensureFreshRoster(env, "comiru_teachers");
   const { results } = await db
-    .prepare("SELECT id FROM teachers WHERE google_sub IS NULL AND active = 1 AND email != '' AND lower(email) = ?")
+    .prepare("SELECT id FROM teachers WHERE google_sub IS NULL AND active = 1 AND lower(COALESCE(login_email_override, email)) = ?")
     .bind(user.email.toLowerCase())
     .all<{ id: number }>();
   if (results.length !== 1) return null;
@@ -157,7 +158,7 @@ teacherApi.get("/terms", async (c) => {
       `SELECT t.*, e.submitted_at, e.updated_at
          FROM terms t
          LEFT JOIN teacher_term_entries e ON e.term_id = t.id AND e.teacher_id = ?
-        WHERE t.accepting = 1
+        WHERE t.accepting = 1 AND t.deleted_at IS NULL
         ORDER BY t.start_date`,
     )
     .bind(teacher.id)

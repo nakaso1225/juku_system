@@ -1,20 +1,21 @@
 :root {
-  --bg: #f6f7f9;
+  color-scheme: light;
+  --bg: #ffffff;
   --surface: #ffffff;
   --text: #1f2933;
   --muted: #6b7280;
   --border: #dde1e6;
-  --primary: #2563eb;
-  --primary-weak: #dbe7fe;
-  --on: #16a34a;
-  --on-weak: #dcfce7;
+  --primary: #285f92;
+  --primary-weak: #edf3f8;
+  --on: #286344;
+  --on-weak: #f0f7f2;
   --warn: #b45309;
   --warn-weak: #fef3c7;
   --danger: #dc2626;
   --danger-weak: #fee2e2;
   --closed: #eceef1;
-  --radius: 10px;
-  --shadow: 0 1px 3px rgba(0, 0, 0, 0.08);
+  --radius: 4px;
+  --shadow: none;
 }
 
 * { box-sizing: border-box; }
@@ -59,7 +60,7 @@ button, .btn {
   border: 1px solid var(--border);
   background: var(--surface);
   color: var(--text);
-  border-radius: 8px;
+  border-radius: 4px;
   padding: 8px 14px;
   cursor: pointer;
   text-decoration: none;
@@ -77,7 +78,7 @@ input[type="text"], input[type="email"], input[type="date"], input[type="number"
   width: 100%;
   padding: 10px 12px;
   border: 1px solid var(--border);
-  border-radius: 8px;
+  border-radius: 4px;
   background: var(--surface);
   color: var(--text);
 }
@@ -127,10 +128,10 @@ label.field > span { display: block; font-weight: 600; margin-bottom: 4px; font-
 
 .toast {
   position: fixed; left: 50%; bottom: calc(84px + env(safe-area-inset-bottom)); transform: translateX(-50%);
-  background: #111827; color: #fff; padding: 10px 16px; border-radius: 8px;
+  background: var(--surface); color: var(--text); border: 1px solid var(--border); padding: 10px 16px; border-radius: 4px;
   font-size: 0.9rem; z-index: 50; max-width: calc(100% - 32px);
 }
-.toast.error { background: var(--danger); }
+.toast.error { background: var(--danger-weak); color: var(--danger); border-color: var(--danger); }
 
 /* ------------------------------------------------ カレンダー */
 .cal-week { margin-bottom: 20px; }
@@ -190,6 +191,8 @@ label.field > span { display: block; font-weight: 600; margin-bottom: 4px; font-
   padding: 10px 12px; white-space: nowrap; color: var(--muted);
 }
 .tab.active { border-bottom-color: var(--primary); color: var(--primary); font-weight: 600; }
+.sub-tabs { flex-wrap: wrap; overflow: visible; gap: 4px 12px; }
+.sub-tabs .tab { padding: 6px 2px; min-height: 32px; border-bottom-width: 1px; font-size: 0.9rem; }
 
 .table-wrap { overflow-x: auto; }
 table.list { width: 100%; border-collapse: collapse; font-size: 0.9rem; }
@@ -245,15 +248,15 @@ table.list input { padding: 6px 8px; min-width: 90px; }
 .modal-footer .btn-primary { white-space: nowrap; }
 
 /* ------------------------------------------------ 割り当て画面 */
-.tone-math { --tone: #2563eb; --tone-weak: #dbeafe; }
-.tone-jp { --tone: #be185d; --tone-weak: #fce7f3; }
-.tone-en { --tone: #7c3aed; --tone-weak: #ede9fe; }
-.tone-sci { --tone: #059669; --tone-weak: #d1fae5; }
-.tone-soc { --tone: #b45309; --tone-weak: #fef3c7; }
-.tone-other { --tone: #475569; --tone-weak: #e2e8f0; }
+.tone-math { --tone: #1e3a8a; --tone-weak: #eff6ff; }
+.tone-en { --tone: #14532d; --tone-weak: #f0fdf4; }
+.tone-jp { --tone: #78350f; --tone-weak: #fffbeb; }
+.tone-sci { --tone: #155e75; --tone-weak: #ecfeff; }
+.tone-soc { --tone: #4c1d95; --tone-weak: #f5f3ff; }
+.tone-other { --tone: #374151; --tone-weak: #f4f6f8; }
 
 .assign-toolbar { padding: 12px 16px; }
-.count-chip { font-size: 0.8rem; padding: 2px 8px; border-radius: 999px; background: var(--tone-weak); color: var(--tone); font-weight: 600; }
+.count-chip { font-size: 0.8rem; padding: 2px 8px; border-radius: 3px; background: var(--tone-weak); color: var(--tone); font-weight: 600; }
 .suggest-item.current { background: var(--primary-weak); }
 
 .conflict-bar { background: var(--danger-weak); color: var(--danger); border-radius: var(--radius); padding: 8px 12px; margin-bottom: 12px; font-size: 0.9rem; }
@@ -279,32 +282,33 @@ table.list input { padding: 6px 8px; min-width: 90px; }
 .assign-table .cal-period small { display: block; font-size: 0.65rem; color: var(--muted); font-weight: 400; }
 
 .acell {
-  position: relative; height: 56px; border-radius: 7px; border: 1px solid var(--border); background: var(--surface);
+  position: relative; height: 56px; border-radius: 3px; border: 1px solid var(--border); background: var(--surface);
   text-align: center; vertical-align: middle; font-size: 0.8rem; padding: 2px;
 }
 .acell.out { background: transparent; border: 1px dashed var(--closed); }
 .acell.closed { background: var(--closed); border-color: var(--closed); color: var(--muted); }
-.acell.unavailable { background: repeating-linear-gradient(45deg, #f3f4f6, #f3f4f6 6px, #e9ebee 6px, #e9ebee 12px); border-color: #e5e7eb; }
+.acell.unavailable { background: #f3f4f5; border-color: #e5e7eb; }
 .acell.open { cursor: pointer; }
 .acell.open:hover { outline: 2px solid var(--primary); }
-.acell.has-teacher { background: var(--on-weak); border-color: #86efac; }
+.acell.has-teacher { background: var(--on-weak); border-color: #c4d9c9; }
 .acell.has-teacher .hint { color: var(--on); font-weight: 600; }
 .acell.full .hint, .acell.none .hint { color: var(--muted); }
 .acell.assigned { cursor: pointer; background: var(--surface); }
 .acell.conflict { border: 2px solid var(--danger); background: var(--danger-weak); }
 .pill {
-  display: flex; justify-content: space-between; align-items: center; gap: 4px; padding: 3px 6px; border-radius: 6px;
+  display: flex; justify-content: space-between; align-items: center; gap: 4px; padding: 3px 6px; border-radius: 3px;
   background: var(--tone-weak); color: var(--tone); border: 1px solid var(--tone); font-weight: 600; cursor: grab; touch-action: none;
   overflow: hidden; white-space: nowrap;
 }
 .pill-name { overflow: hidden; text-overflow: ellipsis; }
+.pill-subject { display: block; font-size: 0.7rem; font-weight: 400; }
 .pill-table { font-size: 0.7rem; background: var(--surface); border-radius: 4px; padding: 0 4px; flex-shrink: 0; }
 .acell-reason { color: var(--danger); font-size: 0.65rem; line-height: 1.2; margin-top: 2px; }
 .acell-del {
   position: absolute; top: -6px; right: -6px; width: 20px; height: 20px; min-height: 20px; padding: 0; border-radius: 50%;
   font-size: 0.75rem; line-height: 1; display: none; background: var(--surface); color: var(--danger); border-color: var(--danger);
 }
-.acell.assigned:hover .acell-del { display: inline-flex; }
+.acell.assigned:hover .acell-del, .acell.assigned:focus-within .acell-del { display: inline-flex; }
 .acell.drop-ok { outline: 3px solid var(--on); }
 .acell.drop-warn { outline: 3px solid var(--warn); }
 .acell.drop-no { outline: 3px solid var(--danger); }
@@ -371,7 +375,7 @@ body.dragging, body.dragging * { cursor: grabbing !important; user-select: none;
 .popover-layer { position: fixed; inset: 0; z-index: 40; }
 .popover {
   position: fixed; width: 340px; max-width: calc(100vw - 16px); max-height: calc(100vh - 16px); overflow-y: auto; background: var(--surface);
-  border: 1px solid var(--border); border-radius: var(--radius); box-shadow: 0 8px 24px rgba(0, 0, 0, 0.18); padding: 12px;
+  border: 1px solid #9ca8b3; border-radius: var(--radius); padding: 12px;
 }
 .teacher-row { display: flex; gap: 6px; }
 .teacher-row .teacher-item { flex: 1; min-height: 38px; padding: 6px 10px; }
@@ -403,3 +407,76 @@ kbd {
 .copy-menu > summary { list-style: none; cursor: pointer; display: inline-block; }
 .copy-menu > summary::-webkit-details-marker { display: none; }
 .copy-menu[open] { display: inline-flex; gap: 6px; align-items: center; }
+
+/* 時間割の切替と講師カレンダー：通常の表・ボタンで操作する */
+.assign-view-switch { display: flex; gap: 4px; padding: 4px 0 10px; }
+.assign-view-switch .selected { border-color: var(--primary); color: var(--primary); background: var(--primary-weak); }
+.teacher-calendar-help { justify-content: space-between; margin-top: 12px; }
+.teacher-grid .cal-week { overflow-x: auto; }
+.teacher-grid .assign-table { min-width: 650px; }
+.teacher-cell { height: 74px; }
+.teacher-open-slot { width: 100%; height: 100%; min-height: 60px; padding: 4px; border: 0; background: transparent; color: var(--on); font-size: 0.85rem; }
+.teacher-open-slot:disabled { color: var(--muted); opacity: 1; }
+.teacher-lesson { display: flex; flex-direction: column; align-items: stretch; width: 100%; padding: 5px 4px; text-align: center; font-size: 0.85rem; border-radius: 2px; background: #f4f6f8; cursor: pointer; }
+.teacher-lesson + .teacher-lesson { margin-top: 3px; }
+.teacher-lesson small { font-size: 0.7rem; color: var(--muted); }
+.pending .teacher-lesson { border-style: dashed; }
+.pending-label { font-size: 0.7rem; color: var(--primary); }
+.student-candidates { margin-top: 10px; }
+.student-candidate { padding: 10px 0; border-bottom: 1px solid var(--border); }
+.student-candidate .row { margin-top: 4px; }
+.copy-menu > summary { border: 1px solid var(--border); border-radius: 4px; }
+@media (max-width: 640px) {
+  .assign-head { position: static; }
+  .teacher-toolbar .row { align-items: flex-start; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .acell.pending::after, .acell.saving { animation: none; }
+}
+
+/* コマを保存したり警告が出たりしても、表の行と操作欄の高さを変えない。 */
+#assign-root { overflow-anchor: none; }
+.assign-head { background: var(--surface); }
+.assignment-summary { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 8px; align-items: center; margin-top: 8px; }
+.assigned-counts { display: flex; gap: 6px; align-items: center; white-space: nowrap; overflow-x: auto; min-height: 32px; }
+.assigned-counts > * { flex-shrink: 0; }
+.assignment-save-status { min-height: 22px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.palette-panel, .palette-panel.brushing { padding: 4px 8px; }
+.palette-heading { min-height: 32px; }
+.palette-heading > span { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.palette-panel .palette:empty { display: flex; }
+.conflict-line { height: 34px; padding: 4px 2px; display: flex; align-items: center; }
+.conflict-line > .btn-link { white-space: nowrap; min-height: 26px; }
+.acell { height: 80px; padding: 4px 2px 25px; }
+.pill { min-height: 44px; }
+.acell-reason { position: absolute; left: 2px; right: 2px; bottom: 3px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; font-size: 0.7rem; }
+.pending-label { position: absolute; left: 2px; right: 2px; bottom: 14px; line-height: 1; }
+.teacher-cell { height: 80px; padding: 2px; }
+.teacher-cell.assigned { padding: 4px 2px 25px; }
+.teacher-lesson { background: var(--student-bg); color: var(--student-text); border-color: var(--student-border); border-left-width: 3px; }
+.teacher-lesson small { color: inherit; }
+.teacher-cell .teacher-lesson { min-height: 50px; }
+.teacher-cell:has(.teacher-lesson:nth-child(2)) .teacher-lesson { min-height: 24px; padding: 1px; }
+.teacher-cell:has(.teacher-lesson:nth-child(2)) .teacher-lesson small { display: none; }
+.week-navigation { display: flex; align-items: center; justify-content: space-between; gap: 6px; margin: 4px 0 10px; }
+.week-navigation select { width: auto; max-width: 100%; min-width: 0; padding: 5px 8px; }
+.week-navigation button { flex-shrink: 0; }
+.assign-navigation { display: flex; justify-content: space-between; align-items: center; gap: 4px 16px; flex-wrap: wrap; padding-bottom: 8px; }
+.assign-navigation .assign-view-switch, .assign-navigation .week-navigation { padding: 0; margin: 0; }
+.assign-grid .cal-week-head { display: none; }
+.palette { height: 52px; }
+.palette .teacher-chip { height: 36px; min-height: 36px; padding: 2px 8px; font-size: 0.85rem; line-height: 1.1; }
+.palette .teacher-chip small { line-height: 1.1; }
+.topbar { flex-wrap: wrap; }
+.copy-menu[open] { display: block; }
+.copy-menu-items { position: absolute; top: calc(100% + 4px); right: 0; z-index: 25; width: 180px; display: flex; flex-direction: column; gap: 6px; padding: 6px; border: 1px solid var(--border); background: var(--surface); border-radius: 4px; }
+.teacher-account, .term-management { border-top: 1px solid var(--border); margin-top: 20px; padding-top: 16px; }
+.deleted-terms { margin-top: 16px; }
+.deleted-terms > summary { cursor: pointer; }
+.deleted-term { padding: 8px 0; }
+@media (max-width: 650px) {
+  .assignment-summary { grid-template-columns: minmax(0, 1fr); }
+  .week-navigation { flex-wrap: wrap; }
+  .week-navigation select { flex: 1; font-size: 0.8rem; }
+  .palette-heading .brush-note { font-size: 0.75rem; }
+}

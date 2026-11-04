@@ -37,8 +37,37 @@ registerSettingsRoutes(adminApi);
 // ---------------------------------------------------------------- 講習
 
 adminApi.get("/terms", async (c) => {
-  const { results } = await c.env.DB.prepare("SELECT * FROM terms ORDER BY start_date DESC").all();
-  return c.json(results.map((row) => termForClient(rowToTerm(row))));
+  const deleted = c.req.query("deleted") === "1";
+  const { results } = await c.env.DB.prepare(`SELECT * FROM terms WHERE deleted_at IS ${deleted ? "NOT NULL" : "NULL"} ORDER BY start_date DESC`).all();
+  return c.json(results.map((row) => ({ ...termForClient(rowToTerm(row)), ...(deleted ? { deleted_at: row.deleted_at } : {}) })));
+});
+
+adminApi.get("/terms/:termId/delete-preview", async (c) => {
+  const term = await getTerm(c.env.DB, Number(c.req.param("termId")));
+  const row = await c.env.DB.prepare(`SELECT version,
+    (SELECT COUNT(*) FROM assignments WHERE term_id = ?1) AS assignments,
+    (SELECT COUNT(*) FROM teacher_term_entries WHERE term_id = ?1) AS teachers,
+    (SELECT COUNT(*) FROM student_term_entries WHERE term_id = ?1) AS students,
+    (SELECT COUNT(*) FROM comiru_lessons WHERE term_id = ?1) AS comiru
+    FROM terms WHERE id = ?1`).bind(term.id).first();
+  return c.json({ ...row, name: term.name });
+});
+
+adminApi.delete("/terms/:termId", async (c) => {
+  const body = await c.req.json<{ confirmed?: boolean; expected_version?: number }>();
+  if (body.confirmed !== true || !Number.isInteger(body.expected_version)) throw new HttpError(400, "確認画面で内容を確認してから削除してください");
+  const term = await getTerm(c.env.DB, Number(c.req.param("termId")));
+  const result = await c.env.DB.prepare(`UPDATE terms SET deleted_at = ?, accepting = 0, version = version + 1
+    WHERE id = ? AND deleted_at IS NULL AND version = ?`).bind(nowIso(), term.id, body.expected_version).run();
+  if (!result.meta.changes) throw new HttpError(409, "講習が変更されています。もう一度削除内容を確認してください");
+  return c.json({ ok: true });
+});
+
+adminApi.post("/terms/:termId/restore", async (c) => {
+  const row = await c.env.DB.prepare(`UPDATE terms SET deleted_at = NULL, version = version + 1
+    WHERE id = ? AND deleted_at IS NOT NULL RETURNING *`).bind(Number(c.req.param("termId"))).first();
+  if (!row) throw new HttpError(404, "削除した講習が見つかりません");
+  return c.json(termForClient(rowToTerm(row)));
 });
 
 adminApi.post("/terms", async (c) => {
@@ -109,7 +138,7 @@ adminApi.get("/teachers", async (c) => {
   const termId = Number(c.req.query("term_id") || 0);
   const hidden = c.req.query("hidden") === "1" ? 1 : 0;
   const { results } = await c.env.DB.prepare(
-    `SELECT t.id, t.name, ${PERSON_KANA_SQL("t")}, t.email, t.google_email, t.google_sub IS NOT NULL AS linked, t.comiru_teacher_id, t.hidden,
+    `SELECT t.id, t.name, ${PERSON_KANA_SQL("t")}, t.email, t.google_email, t.login_email_override, t.google_sub IS NOT NULL AS linked, t.comiru_teacher_id, t.hidden,
             (SELECT group_concat(subject, ', ') FROM teacher_subjects s WHERE s.teacher_id = t.id) AS subjects,
             e.submitted_at, e.updated_at, e.note,
             (SELECT COUNT(*) FROM teacher_availability a WHERE a.teacher_id = t.id AND a.term_id = ?1) AS slot_count
@@ -132,6 +161,22 @@ adminApi.patch("/teachers/:teacherId/profile", async (c) => {
   ]);
   if (!results[0].meta.changes) throw new HttpError(404, "講師が見つかりません");
   return c.json({ ok: true });
+});
+
+adminApi.put("/teachers/:teacherId/login-email", async (c) => {
+  const email = String((await c.req.json<{ email?: string }>()).email ?? "").trim().toLowerCase();
+  if (email.length > 254 || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) throw new HttpError(400, "Googleアカウントのメールアドレスを入力してください");
+  const teacherId = Number(c.req.param("teacherId"));
+  const exists = await c.env.DB.prepare("SELECT id FROM teachers WHERE id = ? AND active = 1").bind(teacherId).first();
+  if (!exists) throw new HttpError(404, "講師が見つかりません");
+  const result = await c.env.DB.prepare(`UPDATE teachers SET login_email_override = ?1,
+      google_sub = CASE WHEN lower(COALESCE(google_email, '')) = ?1 THEN google_sub ELSE NULL END,
+      google_email = CASE WHEN lower(COALESCE(google_email, '')) = ?1 THEN google_email ELSE NULL END, updated_at = ?2
+    WHERE id = ?3 AND NOT EXISTS (SELECT 1 FROM teachers other WHERE other.id != ?3 AND other.active = 1
+      AND (lower(COALESCE(other.login_email_override, other.email)) = ?1 OR lower(other.google_email) = ?1))`)
+    .bind(email, nowIso(), teacherId).run();
+  if (!result.meta.changes) throw new HttpError(409, "このメールアドレスは別の講師に登録されています");
+  return c.json({ ok: true, email });
 });
 
 // 「本人です」申請の一覧。同じ名前の講師（候補）を、comiru のメールアドレスと一緒に返す

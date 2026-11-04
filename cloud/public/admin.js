@@ -30,6 +30,8 @@ const state = {
   terms: [],
   termId: null,
   tab: "assign",
+  peopleTab: "teachers",
+  settingsTab: "term",
   teacherList: { q: "", filter: "all" },
   studentList: { q: "", filter: "all" },
 };
@@ -88,7 +90,7 @@ function header() {
     el(
       "div",
       { class: "topbar" },
-      el("h1", {}, "講習管理"),
+      el("div", { class: "row" }, el("h1", {}, "講習管理"), state.terms.length ? termSelect : el("span", { class: "muted" }, "講習がまだありません")),
       el(
         "div",
         { class: "who" },
@@ -101,53 +103,28 @@ function header() {
         ),
       ),
     ),
-    el(
-      "div",
-      { class: "row", style: "margin-bottom:12px" },
-      state.terms.length ? termSelect : el("span", { class: "muted" }, "講習がまだありません"),
-      el(
-        "button",
-        {
-          type: "button",
-          onclick: () => {
-            if (!canNavigate()) return;
-            state.tab = "new-term";
-            render();
-          },
-        },
-        "＋ 新しい講習を作る",
-      ),
-    ),
   );
 }
 
 function tabs() {
-  const items = [
-    ["assign", "割り当て"],
-    ["teachers", "講師"],
-    ["students", "生徒"],
-    ["term", "講習の設定"],
-    ["settings", "座席設定"],
-    ["staff", "事務アカウント"],
-  ];
-  return el(
-    "div",
-    { class: "tabs" },
-    items.map(([key, label]) =>
-      el(
-        "button",
-        {
-          type: "button",
-          class: `tab${state.tab === key ? " active" : ""}`,
-          onclick: () => {
-            if (!canNavigate()) return;
-            state.tab = key;
-            render();
-          },
-        },
-        label,
-      ),
-    ),
+  const group = ["teachers", "students"].includes(state.tab) ? "people" : state.tab === "assign" ? "assign" : "settings";
+  const navigate = (key) => {
+    if (!canNavigate()) return;
+    state.tab = key;
+    if (["teachers", "students"].includes(key)) state.peopleTab = key;
+    if (["term", "settings", "staff"].includes(key)) state.settingsTab = key;
+    render();
+  };
+  const nav = (items, active, className, label) => el("nav", { class: className, "aria-label": label },
+    items.map(([key, text, target = key]) => el("button", {
+      type: "button", class: `tab${active === key ? " active" : ""}`, "aria-current": active === key ? "page" : null,
+      onclick: () => navigate(target),
+    }, text)),
+  );
+  return el("div", { class: "admin-navigation" },
+    nav([["assign", "時間割"], ["people", "名簿・予定", state.peopleTab], ["settings", "設定", state.settingsTab]], group, "tabs", "主な画面"),
+    group === "people" ? nav([["teachers", "講師"], ["students", "生徒"]], state.tab, "tabs sub-tabs", "名簿・予定の種類") : null,
+    group === "settings" ? nav([["term", "講習の設定"], ["settings", "座席設定"], ["staff", "事務アカウント"]], state.tab, "tabs sub-tabs", "設定の種類") : null,
   );
 }
 
@@ -158,8 +135,10 @@ async function render() {
   const body = el("div", {}, el("p", { class: "muted" }, "読み込み中…"));
   app.replaceChildren(header(), tabs(), body);
   try {
-    if (state.tab === "new-term" || (!currentTerm() && ["assign", "teachers", "students", "term"].includes(state.tab))) {
+    if (state.tab === "new-term") {
       body.replaceChildren(termForm(null));
+    } else if (!currentTerm() && ["assign", "teachers", "students", "term"].includes(state.tab)) {
+      body.replaceChildren(termSettingsView(null));
     } else if (state.tab === "teachers") {
       body.replaceChildren(await teachersView());
     } else if (state.tab === "assign") {
@@ -170,7 +149,7 @@ async function render() {
     } else if (state.tab === "students") {
       body.replaceChildren(await studentsView());
     } else if (state.tab === "term") {
-      body.replaceChildren(termForm(currentTerm()));
+      body.replaceChildren(termSettingsView(currentTerm()));
     } else if (state.tab === "staff") {
       body.replaceChildren(await staffView());
     } else if (state.tab === "settings") {
@@ -283,12 +262,18 @@ async function teachersView() {
           { style: "margin:0" },
           showHidden ? `隠している講師（${teachers.length}人）` : `講師（提出 ${submitted}人・ログイン済み ${linked}人 / 全${teachers.length}人）`,
         ),
-        el("a", { class: "btn btn-small", href: `/api/admin/terms/${term.id}/export/teachers.csv` }, "今のアプリ用CSV（講師）"),
+        el("div", { class: "row" },
+          el("button", { type: "button", class: "btn-small", onclick: () => {
+            state.teacherList.filter = showHidden ? "all" : "hidden";
+            render();
+          } }, showHidden ? "表示中の講師に戻る" : "非表示の講師を戻す"),
+          el("a", { class: "btn btn-small", href: `/api/admin/terms/${term.id}/export/teachers.csv` }, "今のアプリ用CSV（講師）"),
+        ),
       ),
       el(
         "p",
         { class: "muted" },
-        "講師は comiru に登録されたメールアドレスの Google アカウントでログインすると、自動で本人と紐付きます。",
+        "詳細の「ログイン用メール」に登録したGoogleアカウントで利用できます。",
       ),
       listControls(
         "teacherList",
@@ -297,7 +282,7 @@ async function teachersView() {
           ["submitted", "提出済み"],
           ["unsubmitted", "未提出"],
           ["unlinked", "まだログインしていない"],
-          ["hidden", "隠している講師"],
+          ...(showHidden ? [["hidden", "非表示"]] : []),
         ],
         () => (showHidden !== (state.teacherList.filter === "hidden") ? render() : redraw()),
       ),
@@ -325,7 +310,18 @@ function teacherRow(t, term) {
     el("td", {}, t.submitted_at ? el("span", { class: "badge ok" }, "提出済み") : el("span", { class: "badge warn" }, "未提出")),
     el("td", {}, fmtDateTime(t.updated_at)),
     el("td", { class: "num" }, t.submitted_at ? t.slot_count : ""),
-    el("td", {}, el("button", { type: "button", class: "btn-small", onclick: () => openTeacherModal(t, term) }, "詳細")),
+    el("td", {}, el("div", { class: "row" },
+      el("button", { type: "button", class: "btn-small", onclick: () => openTeacherModal(t, term) }, "詳細"),
+      t.hidden ? el("button", { type: "button", class: "btn-small", onclick: async (e) => {
+        const button = e.currentTarget;
+        button.disabled = true;
+        try {
+          await api(`/api/admin/teachers/${t.id}/visibility`, { method: "POST", body: { hidden: false } });
+          toast(`${t.name} さんを一覧に戻しました`);
+          render();
+        } catch (err) { toast(err.message, true); button.disabled = false; }
+      } }, "一覧に戻す") : null,
+    )),
   );
 }
 
@@ -392,11 +388,12 @@ async function openTeacherModal(t, term) {
   let changedKana = false;
   editorDirty = () => savingKana || kana.value !== savedKana;
   const close = () => {
-    if (savingKana) return toast("保存中です。完了してから閉じてください");
-    if (kana.value !== savedKana && !confirm("保存していないふりがながあります。閉じてよろしいですか？")) return;
+    if (savingKana) { toast("保存中です。完了してから閉じてください"); return false; }
+    if ((kana.value !== savedKana || loginEmail.value !== savedEmail) && !confirm("保存していない変更があります。閉じてよろしいですか？")) return false;
     backdrop.remove();
     editorDirty = () => false;
     if (changedKana) render();
+    return true;
   };
   const saveKana = el("button", { type: "button", class: "btn-small", onclick: async () => {
     if (savingKana) return;
@@ -412,42 +409,29 @@ async function openTeacherModal(t, term) {
     finally { savingKana = false; saveKana.disabled = false; }
   } }, "ふりがなを保存");
 
-  const accountSection = t.linked
-    ? el(
-        "details",
-        { style: "margin-top:16px;border-top:1px solid var(--border);padding-top:12px" },
-        el("summary", { class: "muted" }, `ログインに使っている Google アカウント：${t.google_email}`),
-        el(
-          "p",
-          { class: "muted", style: "margin-top:8px" },
-          "別の人が間違ってこの講師として登録されてしまったときだけ使います。解除すると、このアカウントではこの講師の予定を見られなくなります（入力済みの予定は残ります）。",
-        ),
-        el(
-          "p",
-          { class: "muted" },
-          "解除しても、comiru に登録されたアドレスと同じ Google アカウントなら、本人が次にログインしたときに自動で元に戻ります。違うアカウントの場合は、もう一度「本人確認の申請」と承認が必要です。",
-        ),
-        el(
-          "button",
-          {
-            type: "button",
-            class: "btn-danger btn-small",
-            onclick: async () => {
-              if (!confirm(`${t.google_email} での ${t.name} さんとしてのログインを解除しますか？`)) return;
-              try {
-                await api(`/api/admin/teachers/${t.id}/unlink`, { method: "POST" });
-                toast("解除しました");
-                close();
-                render();
-              } catch (err) {
-                toast(err.message, true);
-              }
-            },
-          },
-          "このアカウントでのログインを解除する",
-        ),
-      )
-    : el("p", { class: "muted", style: "margin-top:16px" }, "まだログインしていません。");
+  const loginEmail = el("input", { type: "email", value: t.login_email_override ?? t.google_email ?? t.email ?? "", autocomplete: "off", maxlength: "254" });
+  let savedEmail = loginEmail.value;
+  editorDirty = () => savingKana || kana.value !== savedKana || loginEmail.value !== savedEmail;
+  const saveEmail = el("button", { type: "button", class: "btn-small", onclick: async () => {
+    if (savingKana) return;
+    const email = loginEmail.value.trim().toLowerCase();
+    if (t.linked && email !== savedEmail.toLowerCase() && !confirm(`${t.name}さんのログイン用メールを変更します。以前のアカウントは使えなくなります。変更しますか？`)) return;
+    const submitted = loginEmail.value;
+    savingKana = true;
+    saveEmail.disabled = true;
+    try {
+      await api(`/api/admin/teachers/${t.id}/login-email`, { method: "PUT", body: { email } });
+      savedEmail = submitted;
+      changedKana = true;
+      toast("ログイン用メールを保存しました");
+    } catch (err) { toast(err.message, true); }
+    finally { savingKana = false; saveEmail.disabled = false; }
+  } }, "ログイン用メールを保存");
+  const accountSection = el("section", { class: "teacher-account" },
+    el("label", { class: "field" }, el("span", {}, "ログイン用メール"), loginEmail),
+    el("p", { class: "muted" }, "このメールのGoogleアカウントで利用できます。変更しても提出済みの予定は残ります。"),
+    saveEmail,
+  );
 
   const backdrop = el(
     "div",
@@ -491,8 +475,7 @@ async function openTeacherModal(t, term) {
               try {
                 await api(`/api/admin/teachers/${t.id}/visibility`, { method: "POST", body: { hidden: !t.hidden } });
                 toast(t.hidden ? `${t.name} さんを一覧に戻しました` : `${t.name} さんを一覧から隠しました`);
-                close();
-                render();
+                if (close()) render();
               } catch (err) {
                 toast(err.message, true);
               }
@@ -854,6 +837,78 @@ function termForm(term) {
 
 // ------------------------------------------------------------ 事務アカウントタブ
 
+function termSettingsView(term) {
+  const deletedList = el("div");
+  let loaded = false;
+  const trash = el("details", { class: "deleted-terms", ontoggle: async () => {
+    if (!trash.open || loaded) return;
+    deletedList.replaceChildren(el("p", { class: "muted" }, "読み込み中…"));
+    try {
+      const deleted = await api("/api/admin/terms?deleted=1");
+      loaded = true;
+      deletedList.replaceChildren(...(deleted.length ? deleted.map((t) => el("div", { class: "row deleted-term" },
+        el("span", {}, t.name), el("button", { type: "button", class: "btn-small", onclick: async (e) => {
+          if (!canNavigate()) return;
+          const button = e.currentTarget;
+          button.disabled = true;
+          try {
+            const restored = await api(`/api/admin/terms/${t.id}/restore`, { method: "POST" });
+            state.terms = [...state.terms.filter((x) => x.id !== restored.id), restored];
+            rememberTerm(restored.id); state.tab = "term"; render(); toast("講習を戻しました（予定の受付は停止中）");
+          } catch (err) { toast(err.message, true); button.disabled = false; }
+        } }, "講習を戻す"),
+      )) : [el("p", { class: "muted" }, "削除した講習はありません")]));
+    } catch (err) { deletedList.replaceChildren(el("p", { class: "warn-text" }, err.message)); }
+  } }, el("summary", {}, "削除した講習"), deletedList);
+  return el("div", {}, termForm(term),
+    el("div", { class: "term-management" },
+      term ? el("div", { class: "row" },
+        el("button", { type: "button", onclick: () => {
+          if (!canNavigate()) return;
+          state.tab = "new-term"; render();
+        } }, "＋ 新しい講習を作る"),
+        el("button", { type: "button", class: "btn-danger", onclick: () => canNavigate() && confirmDeleteTerm(term) }, "この講習を削除"),
+      ) : null,
+      trash,
+    ),
+  );
+}
+
+async function confirmDeleteTerm(term) {
+  let data;
+  try { data = await api(`/api/admin/terms/${term.id}/delete-preview`); }
+  catch (err) { toast(err.message, true); return; }
+  let busy = false;
+  const close = () => { if (!busy) backdrop.remove(); };
+  const error = el("p", { class: "warn-text", role: "alert" });
+  const button = el("button", { type: "button", class: "btn-danger", onclick: async () => {
+    if (busy) return;
+    busy = true; button.disabled = true;
+    const previousSaving = formSaving;
+    formSaving = () => true;
+    try {
+      await api(`/api/admin/terms/${term.id}`, { method: "DELETE", body: { confirmed: true, expected_version: data.version } });
+      // 削除が成功したら手元の一覧からも外す。再取得失敗で二重に削除を送らない。
+      state.terms = state.terms.filter((t) => t.id !== term.id);
+      rememberTerm(state.terms[0]?.id ?? null);
+      state.tab = "term";
+      backdrop.remove();
+      render();
+      toast("講習を削除しました。「削除した講習」から戻せます");
+    } catch (err) { error.textContent = err.message; }
+    finally { busy = false; button.disabled = false; if (backdrop.isConnected) formSaving = previousSaving; }
+  } }, "削除する");
+  const backdrop = el("div", { class: "modal-backdrop" }, el("div", { class: "modal", role: "dialog", "aria-label": "講習の削除確認" },
+    el("h2", {}, `「${data.name}」を削除しますか？`),
+    el("p", {}, `割り当て ${data.assignments}コマ ／ 生徒 ${data.students}人 ／ 講師 ${data.teachers}人`),
+    el("p", {}, "一覧から削除し、予定の受付を停止します。設定の「削除した講習」から元に戻せます。"),
+    el("p", {}, `comiruの授業は削除しません（アプリで追跡中 ${data.comiru}件）。`),
+    error,
+    el("div", { class: "row" }, el("button", { type: "button", onclick: close }, "キャンセル"), button),
+  ));
+  document.body.append(backdrop);
+}
+
 async function roomSettingsView() {
   const settings = await api("/api/admin/settings");
   if (state.tab !== "settings") return el("div");
@@ -1013,7 +1068,7 @@ async function start() {
   }
   state.meta = await api("/api/meta");
   await loadTerms();
-  if (!state.terms.length) state.tab = "new-term";
+  if (!state.terms.length) state.tab = "term";
   await render();
 }
 

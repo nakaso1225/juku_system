@@ -62,7 +62,7 @@ export function termForClient(term: Term) {
 }
 
 export async function getTerm(db: D1Database, termId: number): Promise<Term> {
-  const row = await db.prepare("SELECT * FROM terms WHERE id = ?").bind(termId).first();
+  const row = await db.prepare("SELECT * FROM terms WHERE id = ? AND deleted_at IS NULL").bind(termId).first();
   if (!row) throw new HttpError(404, "講習が見つかりません");
   return rowToTerm(row);
 }
