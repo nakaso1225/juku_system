@@ -874,7 +874,7 @@ function termForm(term) {
   const isNew = !term;
   const values = term
     ? { ...term, closed_dates: new Set(term.closed_dates), periods: new Set(term.periods) }
-    : { name: "", start_date: "", end_date: "", periods: new Set([2, 3, 4, 5, 6]), closed_dates: new Set(), accepting: true };
+    : { name: "", start_date: "", end_date: "", periods: new Set(state.meta.periods), closed_dates: new Set(), accepting: true };
 
   const name = el("input", { type: "text", value: values.name, placeholder: "例：2026年冬期講習" });
   const start = el("input", { type: "date", value: values.start_date });

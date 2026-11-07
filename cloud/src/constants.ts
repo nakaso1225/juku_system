@@ -31,6 +31,7 @@ export const SUBJECTS = [
 
 // 時限と時刻。comiru のコマ表示名は "[10:45 - 12:15] 2" の形
 export const PERIOD_DEFS: Record<number, { start: string; end: string }> = {
+  1: { start: "9:00", end: "10:30" },
   2: { start: "10:45", end: "12:15" },
   3: { start: "13:15", end: "14:45" },
   4: { start: "15:00", end: "16:30" },

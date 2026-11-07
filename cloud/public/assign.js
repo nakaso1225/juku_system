@@ -632,6 +632,7 @@ function draw({ force = false } = {}) {
     if (!S.needsDraw) active.addEventListener("blur", () => setTimeout(() => S.needsDraw && draw(), 0), { once: true });
     S.needsDraw = true;
     updateSaveStatus();
+    S.refreshSuggest?.();
     return;
   }
   S.needsDraw = false;
@@ -688,8 +689,8 @@ function selectStudent(id) {
   draw();
 }
 
-function studentPicker(students) {
-  const current = students.find((s) => s.id === S.studentId);
+function studentPicker(initialStudents) {
+  const current = initialStudents.find((s) => s.id === S.studentId);
   const input = el("input", { type: "text", placeholder: "生徒を検索", value: current?.name ?? "", autocomplete: "off" });
   const list = el("div", { class: "suggest hidden" });
   const statusBadge = (s) =>
@@ -700,7 +701,8 @@ function studentPicker(students) {
   };
   const show = () => {
     const q = input.value === current?.name ? "" : input.value.normalize("NFKC").replace(/\s+/g, "");
-    const hits = students.filter((s) => !q || s.name.normalize("NFKC").replace(/\s+/g, "").includes(q) || nameKey(s).includes(q));
+    // 描き直しを待っているあいだ（検索欄に入力中）も、最新の名簿（学年など）で候補を出す
+    const hits = studentList().filter((s) => !q || s.name.normalize("NFKC").replace(/\s+/g, "").includes(q) || nameKey(s).includes(q));
     list.replaceChildren(
       ...hits.map((s) =>
         el(
@@ -719,6 +721,7 @@ function studentPicker(students) {
   });
   input.addEventListener("input", show);
   input.addEventListener("blur", () => setTimeout(() => list.classList.add("hidden"), 200));
+  S.refreshSuggest = () => input.isConnected && !list.classList.contains("hidden") && show();
   input.addEventListener("keydown", (e) => {
     if (e.key === "Enter") list.querySelector("button")?.click();
   });
@@ -970,7 +973,7 @@ function openTeacherLesson(assignment, anchor) {
 // ------------------------------------------------------------ コピペ用（comiru 連携が止まったとき、元の GAS のシートに貼って登録する逃げ道）
 
 // 今のアプリ（app.py 版）の「コピペ用をコピー」と同じ形：生徒名・講師名・科目・日付・時限（タブ区切り）
-const SHEET_PERIOD_LABELS = { 2: "2限（10:45-12:15）", 3: "3限（13:15-14:45）", 4: "4限（15:00-16:30）", 5: "5限（16:45-18:15）", 6: "6限（18:30-20:00）", 7: "7限（例外）" };
+const SHEET_PERIOD_LABELS = { 1: "1限（9:00-10:30）", 2: "2限（10:45-12:15）", 3: "3限（13:15-14:45）", 4: "4限（15:00-16:30）", 5: "5限（16:45-18:15）", 6: "6限（18:30-20:00）", 7: "7限（例外）" };
 function sheetSubject(subject) {
   const s = String(subject || "");
   if (/算数/.test(s)) return "算数";
